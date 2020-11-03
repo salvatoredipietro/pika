@@ -40,6 +40,12 @@ output/
 db/
 dump/
 
+# TESTS
+tests/*.o
+tests/*.a
+tests/output/
+tests/log/
+
 # third party
 gdb.txt
 tags
