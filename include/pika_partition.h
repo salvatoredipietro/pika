@@ -9,8 +9,19 @@
 #include "blackwidow/blackwidow.h"
 #include "blackwidow/backupable.h"
 #include "slash/include/scope_record_lock.h"
+#include "slash/include/slash_status.h"
 
-#include "include/pika_binlog.h"
+#include "include/pika_define.h"
+#include "include/storage/pika_binlog.h"
+#include "include/replication/pika_configuration.h"
+#include "include/replication/pika_repl_rg_node.h"
+#include "include/replication/cluster/pika_cluster_rg_node.h"
+
+using slash::Status;
+using replication::Configuration;
+using replication::ClusterMetaStorage;
+using replication::ReplicationGroupNode;
+using replication::ReplicationGroupNodeMetaStorage;
 
 class Cmd;
 
@@ -32,26 +43,108 @@ struct KeyScanInfo {
   }
 };
 
-
 struct BgSaveInfo {
   bool bgsaving;
   time_t start_time;
   std::string s_start_time;
   std::string path;
   LogOffset offset;
-  BgSaveInfo() : bgsaving(false), offset() {}
+  Configuration conf_state;
+  BgSaveInfo() : bgsaving(false), offset(), conf_state() {}
   void Clear() {
     bgsaving = false;
     path.clear();
     offset = LogOffset();
+    conf_state.Reset();
   }
+};
+
+const std::string kConfStateKeyPrefix = "ConfState";
+const std::string kTermKeyPrefix = "Term";
+const std::string kVotedForKeyPrefix = "VotedFor";
+const std::string kKeyGlue = "#";
+
+class MemoryBasedMetaStorage : public ReplicationGroupNodeMetaStorage {
+ public:
+  MemoryBasedMetaStorage();
+  virtual ~MemoryBasedMetaStorage();
+
+  virtual Status applied_offset(LogOffset* offset) override;
+  virtual Status set_applied_offset(const LogOffset& offset) override;
+  virtual Status snapshot_offset(LogOffset* offset) override;
+  virtual Status set_snapshot_offset(const LogOffset& offset) override;
+  virtual Status configuration(Configuration* conf) override;
+  virtual Status set_configuration(const Configuration& conf) override;
+  virtual Status ApplyConfiguration(const Configuration& conf, const LogOffset& offset) override;
+  virtual Status MetaSnapshot(LogOffset* applied_offset, Configuration* conf) override;
+  virtual Status ResetOffset(const LogOffset& snapshot_offset,
+                             const LogOffset& applied_offset) override;
+  virtual Status ResetOffsetAndConfiguration(const LogOffset& snapshot_offset,
+                                             const LogOffset& applied_offset,
+                                             const Configuration& configuration) override;
+
+ private:
+  // protect the following fields
+  pthread_rwlock_t rwlock_;
+  LogOffset applied_offset_;
+  LogOffset snapshot_offset_;
+  Configuration configuration_;
+};
+
+class DBBasedClusterMetaStorage : public ClusterMetaStorage {
+ public:
+  DBBasedClusterMetaStorage(const std::shared_ptr<blackwidow::BlackWidow>& db,
+                              const std::string& partition_name);
+  ~DBBasedClusterMetaStorage();
+
+  virtual Status applied_offset(LogOffset* offset) override;
+  virtual Status set_applied_offset(const LogOffset& offset) override;
+  virtual Status snapshot_offset(LogOffset* offset) override;
+  virtual Status set_snapshot_offset(const LogOffset& offset) override;
+  virtual Status configuration(Configuration* conf) override;
+  virtual Status set_configuration(const Configuration& conf) override;
+  virtual Status ApplyConfiguration(const Configuration& conf, const LogOffset& offset) override;
+  virtual Status MetaSnapshot(LogOffset* applied_offset, Configuration* conf) override;
+  virtual Status SetTermAndVotedFor(const PeerID& voted_for,
+                                    uint32_t term) override;
+  virtual Status GetTermAndVotedFor(uint32_t* term,
+                                    PeerID* voted_for) override;
+  virtual Status set_term(uint32_t term) override;
+  virtual Status term(uint32_t* term) override;
+  virtual Status set_voted_for(const PeerID& voted_for) override;
+  virtual Status voted_for(PeerID* peer_id) override;
+  virtual Status ResetOffset(const LogOffset& snapshot_offset,
+                             const LogOffset& applied_offset) override;
+  virtual Status ResetOffsetAndConfiguration(const LogOffset& snapshot_offset,
+                                             const LogOffset& applied_offset,
+                                             const Configuration& configuration) override;
+
+ private:
+  void Initialize();
+  std::string MakeConfStateKey();
+  std::string MakeTermKey();
+  std::string MakeVotedForKey();
+  Status unsafe_set_configuration(const Configuration& conf);
+
+ private:
+  std::string partition_name_;
+  std::shared_ptr<blackwidow::BlackWidow> db_;
+
+  // protect the following fields
+  pthread_rwlock_t rwlock_;
+  LogOffset applied_offset_;
+  LogOffset snapshot_offset_;
+  Configuration configuration_;
+  uint32_t term_;
+  PeerID voted_for_;
 };
 
 class Partition : public std::enable_shared_from_this<Partition> {
  public:
   Partition(const std::string& table_name,
             uint32_t partition_id,
-            const std::string& table_db_path);
+            const std::string& table_db_path,
+            const std::shared_ptr<blackwidow::BlackWidow>& state_db);
   virtual ~Partition();
 
   std::string GetTableName() const;
@@ -67,13 +160,20 @@ class Partition : public std::enable_shared_from_this<Partition> {
 
   slash::lock::LockMgr* LockMgr();
 
-  void PrepareRsync();
-  bool TryUpdateMasterOffset();
+  Status PrepareRsync();
+  Status TryUpdateMasterOffset(const std::shared_ptr<ReplicationGroupNode>& node,
+                               LogOffset* offset);
   bool ChangeDb(const std::string& new_path);
 
   void Leave();
   void Close();
   void MoveToTrash();
+
+  // Replicate state use
+  void set_repl_status(const Status& status);
+  Status repl_status();
+  void set_leader_id(const PeerID& leader_id);
+  PeerID leader_id();
 
   // BgSave use;
   bool IsBgSaving();
@@ -88,7 +188,13 @@ class Partition : public std::enable_shared_from_this<Partition> {
   Status GetKeyNum(std::vector<blackwidow::KeyInfo>* key_info);
   KeyScanInfo GetKeyScanInfo();
 
+  Status ApplyNormalEntry(const LogOffset& offset);
+  Status ApplyConfChange(const InnerMessage::ConfChange& change, const LogOffset& offset);
+
  private:
+  int Start();
+  int Stop();
+
   std::string table_name_;
   uint32_t partition_id_;
 
@@ -108,9 +214,14 @@ class Partition : public std::enable_shared_from_this<Partition> {
   slash::Mutex key_info_protector_;
   KeyScanInfo key_scan_info_;
 
-  /*
-   * BgSave use
-   */
+  // Record the current meta state
+  ReplicationGroupNodeMetaStorage* meta_storage_;
+  // Record the state of replication
+  pthread_rwlock_t rg_state_rwlock_;
+  Status repl_status_;
+  PeerID leader_id_;
+
+  // BgSave use
   static void DoBgSave(void* arg);
   bool RunBgsaveEngine();
   bool InitBgsaveEnv();
@@ -129,7 +240,6 @@ class Partition : public std::enable_shared_from_this<Partition> {
    */
   Partition(const Partition&);
   void operator=(const Partition&);
-
 };
 
 #endif

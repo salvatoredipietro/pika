@@ -24,8 +24,6 @@ class BitGetCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new BitGetCmd(*this);
   }
@@ -49,8 +47,6 @@ class BitSetCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new BitSetCmd(*this);
   }
@@ -76,8 +72,6 @@ class BitCountCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new BitCountCmd(*this);
   }
@@ -105,8 +99,6 @@ class BitPosCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new BitPosCmd(*this);
   }
@@ -133,8 +125,6 @@ class BitOpCmd : public Cmd {
   BitOpCmd(const std::string& name, int arity, uint16_t flag)
         : Cmd(name, arity, flag) {};
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new BitOpCmd(*this);
   }

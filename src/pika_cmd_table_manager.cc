@@ -8,8 +8,9 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-#include "include/pika_conf.h"
 #include "slash/include/slash_mutex.h"
+
+#include "include/pika_conf.h"
 
 
 #define gettid() syscall(__NR_gettid)

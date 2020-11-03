@@ -3,13 +3,11 @@
 // LICENSE file in the root directory of this source tree. An additional grant
 // of patent rights can be found in the PATENTS file in the same directory.
 
-#include "include/pika_rm.h"
 #include "include/pika_table.h"
 #include "include/pika_server.h"
 #include "include/pika_cluster.h"
 #include "include/pika_cmd_table_manager.h"
 
-extern PikaReplicaManager* g_pika_rm;
 extern PikaServer* g_pika_server;
 extern PikaConf* g_pika_conf;
 
@@ -26,7 +24,7 @@ void PkClusterInfoCmd::DoInitial() {
     return;
   }
   if (g_pika_conf->classic_mode()) {
-    res_.SetRes(CmdRes::kErrOther, "PkClusterInfo only support on sharding mode");
+    res_.SetRes(CmdRes::kErrOther, "PkClusterInfo only support on cluster mode");
     return;
   }
   if (!strcasecmp(argv_[2].data(), kSlotSection.data())) {
@@ -186,46 +184,11 @@ void PkClusterInfoCmd::ClusterInfoSlotAll(std::string* info) {
 Status PkClusterInfoCmd::GetSlotInfo(const std::string table_name,
                                      uint32_t partition_id,
                                      std::string* info) {
-  std::shared_ptr<SyncMasterPartition> partition =
-    g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name, partition_id));
-  if (!partition) {
-    return Status::NotFound("not found");
-  }
-  Status s;
   std::stringstream tmp_stream;
-
-  // binlog offset section
-  uint32_t filenum = 0;
-  uint64_t offset = 0;
-  partition->Logger()->GetProducerStatus(&filenum, &offset);
-  tmp_stream << partition->PartitionName() << " binlog_offset="
-    << filenum << " " << offset;
-
-  // safety purge section
-  std::string safety_purge;
-  std::shared_ptr<SyncMasterPartition> master_partition =
-      g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name, partition_id));
-  if (!master_partition) {
-    LOG(WARNING) << "Sync Master Partition: " << table_name << ":" << partition_id
-        << ", NotFound";
-    s = Status::NotFound("SyncMasterPartition NotFound");
-  } else {
-    master_partition->GetSafetyPurgeBinlog(&safety_purge);
-  }
-  tmp_stream << ",safety_purge=" << (s.ok() ? safety_purge : "error") << "\r\n";
-
-  if (g_pika_conf->consensus_level()) {
-    LogOffset last_log = master_partition->ConsensusLastIndex();
-    tmp_stream << "  consensus_last_log=" << last_log.ToString() << "\r\n";
-  }
-
-  // partition info section
-  std::string p_info;
-  s = g_pika_rm->GetPartitionInfo(table_name, partition_id, &p_info);
+  Status s = g_pika_server->GetReplicationGroupInfo(ReplicationGroupID(table_name, partition_id), tmp_stream);
   if (!s.ok()) {
     return s;
   }
-  tmp_stream << p_info;
   info->append(tmp_stream.str());
   return Status::OK();
 }
@@ -272,7 +235,7 @@ void SlotParentCmd::DoInitial() {
     return;
   }
   if (g_pika_conf->classic_mode()) {
-    res_.SetRes(CmdRes::kErrOther, "PkClusterAddSlots/PkClusterDelSlots only support on sharding mode");
+    res_.SetRes(CmdRes::kErrOther, "PkClusterAddSlots/PkClusterDelSlots only support on cluster mode");
     return;
   }
 
@@ -347,7 +310,7 @@ void PkClusterAddSlotsCmd::Do(std::shared_ptr<Partition> partition) {
     }
   }
   if (pre_success) {
-    s = g_pika_rm->AddSyncPartition(p_infos_);
+    s = g_pika_server->CreateReplicationGroupNodes(p_infos_);
     if (!s.ok()) {
       LOG(WARNING) << "Addslots add to sync partition failed: " << s.ToString();
       pre_success = false;
@@ -382,11 +345,7 @@ Status PkClusterAddSlotsCmd::AddSlotsSanityCheck() {
       return Status::Corruption("partition " + std::to_string(id) + " already exist");
     }
   }
-  s = g_pika_rm->AddSyncPartitionSanityCheck(p_infos_);
-  if (!s.ok()) {
-    return s;
-  }
-  return Status::OK();
+  return g_pika_server->CreateReplicationGroupNodesSanityCheck(p_infos_);
 }
 
 /* pkcluster delslots 0-3,8-11
@@ -430,9 +389,9 @@ void PkClusterDelSlotsCmd::Do(std::shared_ptr<Partition> partition) {
     }
   }
   if (pre_success) {
-    s = g_pika_rm->RemoveSyncPartition(p_infos_);
+    s = g_pika_server->RemoveReplicationGroupNodes(p_infos_);
     if (!s.ok()) {
-      LOG(WARNING) << "Remvoeslots remove from sync partition failed: " << s.ToString();
+      LOG(WARNING) << "Removeslots remove from sync partition failed: " << s.ToString();
       pre_success = false;
     }
   }
@@ -471,11 +430,7 @@ Status PkClusterDelSlotsCmd::RemoveSlotsSanityCheck() {
       return Status::Corruption("partition " + std::to_string(id) + " not found");
     }
   }
-  s = g_pika_rm->RemoveSyncPartitionSanityCheck(p_infos_);
-  if (!s.ok()) {
-    return s;
-  }
-  return Status::OK();
+  return g_pika_server->RemoveReplicationGroupNodesSanityCheck(p_infos_);
 }
 
 /* pkcluster slotsslaveof no one  [0-3,8-11 | all] [table_id]
@@ -488,8 +443,9 @@ void PkClusterSlotsSlaveofCmd::DoInitial() {
     res_.SetRes(CmdRes::kWrongNum, kCmdNamePkClusterSlotsSlaveof);
     return;
   }
-  if (g_pika_conf->classic_mode()) {
-    res_.SetRes(CmdRes::kErrOther, "PkClusterSlotSync only support on sharding mode");
+  if (g_pika_conf->classic_mode()
+      || g_pika_conf->replication_protocol_type() == ReplicationProtocolType::kClusterProtocol) {
+    res_.SetRes(CmdRes::kErrOther, "PkClusterSlotSlaveof only support on cluster mode with proto_type is kClassic");
     return;
   }
 
@@ -571,54 +527,11 @@ void PkClusterSlotsSlaveofCmd::DoInitial() {
 }
 
 void PkClusterSlotsSlaveofCmd::Do(std::shared_ptr<Partition> partition) {
-  std::vector<uint32_t> to_del_slots;
+  std::set<ReplicationGroupID> group_ids;
   for (const auto& slot : slots_) {
-    std::shared_ptr<SyncSlavePartition> slave_partition =
-        g_pika_rm->GetSyncSlavePartitionByName(
-                PartitionInfo(table_name_, slot));
-    if (!slave_partition) {
-      res_.SetRes(CmdRes::kErrOther, "Slot " + std::to_string(slot) + " not found!");
-      return;
-    }
-    if (is_noone_) {
-      // check okay
-    } else if (slave_partition->State() == ReplState::kConnected
-      && slave_partition->MasterIp() == ip_ && slave_partition->MasterPort() == port_) {
-      to_del_slots.push_back(slot);
-    }
+    group_ids.insert(ReplicationGroupID(table_name_, slot));
   }
-
-  for (auto to_del : to_del_slots) {
-    slots_.erase(to_del);
-  }
-
-  Status s = Status::OK();
-  ReplState state = force_sync_
-    ? ReplState::kTryDBSync : ReplState::kTryConnect;
-  for (const auto& slot : slots_) {
-    std::shared_ptr<SyncSlavePartition> slave_partition =
-        g_pika_rm->GetSyncSlavePartitionByName(
-                PartitionInfo(table_name_, slot));
-    if (slave_partition->State() == ReplState::kConnected) {
-      s = g_pika_rm->SendRemoveSlaveNodeRequest(table_name_, slot);
-    }
-    if (!s.ok()) {
-      break;
-    }
-    if (slave_partition->State() != ReplState::kNoConnect) {
-      // reset state
-      slave_partition->SetReplState(ReplState::kNoConnect);
-    }
-    if (is_noone_) {
-    } else {
-      s = g_pika_rm->ActivateSyncSlavePartition(
-          RmNode(ip_, port_, table_name_, slot), state);
-      if (!s.ok()) {
-        break;
-      }
-    }
-  }
-
+  Status s = g_pika_server->ResetMaster(group_ids, PeerID(ip_, port_), force_sync_);
   if (s.ok()) {
     res_.SetRes(CmdRes::kOk);
   } else {
@@ -636,7 +549,7 @@ void PkClusterAddTableCmd::DoInitial() {
     return;
   }
   if (g_pika_conf->classic_mode()) {
-    res_.SetRes(CmdRes::kErrOther, "PkClusterTable Cmd only support on sharding mode");
+    res_.SetRes(CmdRes::kErrOther, "PkClusterTable Cmd only support on cluster mode");
     return;
   }
   uint64_t table_id;
@@ -708,7 +621,14 @@ Status PkClusterAddTableCmd::AddTableSanityCheck() {
   if (table_ptr) {
     return Status::Corruption("table already exist!");
   }
-  s = g_pika_rm->SyncTableSanityCheck(table_name_);
+  auto cmd_ptr = shared_from_this();
+  s = g_pika_server->ReplicationGroupNodesSantiyCheck(
+      [cmd_ptr](const std::shared_ptr<ReplicationGroupNode>& node)-> Status {
+        if (node->group_id().TableName() == cmd_ptr->table_name()) {
+          return Status::Corruption("replication group: " + node->group_id().ToString() + " exist");
+        }
+        return Status::OK();
+      });
   return s;
 }
 
@@ -721,7 +641,7 @@ void PkClusterDelTableCmd::DoInitial() {
     return;
   }
   if (g_pika_conf->classic_mode()) {
-    res_.SetRes(CmdRes::kErrOther, "PkClusterTable Cmd only support on sharding mode");
+    res_.SetRes(CmdRes::kErrOther, "PkClusterTable Cmd only support on cluster mode");
     return;
   }
   uint64_t table_id;
@@ -772,7 +692,7 @@ void PkClusterDelTableCmd::Do(std::shared_ptr<Partition> partition) {
     }
   }
   if (pre_success) {
-    s = g_pika_rm->DelSyncTable(table_name_);
+    s = g_pika_server->DelTableLog(table_name_);
     if (!s.ok()) {
       LOG(WARNING) << "DelTable remove from pika rm failed: " << s.ToString();
       pre_success = false;
@@ -808,6 +728,13 @@ Status PkClusterDelTableCmd::DelTableSanityCheck(const std::string &table_name) 
   if (!table_ptr->TableIsEmpty()) {
     return Status::Corruption("table have slots!");
   }
-  s =  g_pika_rm->SyncTableSanityCheck(table_name);
+  auto cmd_ptr = shared_from_this();
+  s = g_pika_server->ReplicationGroupNodesSantiyCheck(
+      [cmd_ptr](const std::shared_ptr<ReplicationGroupNode>& node)-> Status {
+        if (node->group_id().TableName() == cmd_ptr->table_name()) {
+          return Status::Corruption("replication group: " + node->group_id().ToString() + " exist!");
+        }
+        return Status::OK();
+      });
   return s;
 }

@@ -10,15 +10,16 @@
 
 #include <glog/logging.h>
 
-#include "include/pika_conf.h"
 #include "include/pika_server.h"
 #include "include/pika_cmd_table_manager.h"
 #include "include/pika_admin.h"
-#include "include/pika_rm.h"
+#include "include/pika_conf.h"
+
+using replication::Ready;
+using replication::ReplicationGroupNode;
 
 extern PikaConf* g_pika_conf;
 extern PikaServer* g_pika_server;
-extern PikaReplicaManager* g_pika_rm;
 extern PikaCmdTableManager* g_pika_cmd_table_manager;
 
 PikaClientConn::PikaClientConn(int fd, std::string ip_port,
@@ -45,6 +46,7 @@ std::shared_ptr<Cmd> PikaClientConn::DoCmd(
         "unknown or unsupported command \'" + opt + "\"");
     return tmp_ptr;
   }
+  c_ptr->SetStage(Cmd::kNone);
   c_ptr->SetConn(std::dynamic_pointer_cast<PikaClientConn>(shared_from_this()));
   c_ptr->SetResp(resp_ptr);
 
@@ -87,9 +89,6 @@ std::shared_ptr<Cmd> PikaClientConn::DoCmd(
     }
   }
 
-  if (g_pika_conf->consensus_level() != 0 && c_ptr->is_write()) {
-    c_ptr->SetStage(Cmd::kBinlogStage);
-  }
   if (!g_pika_server->IsCommandSupport(opt)) {
     c_ptr->res().SetRes(CmdRes::kErrOther,
         "This command is not supported in current configuration");
@@ -116,9 +115,15 @@ std::shared_ptr<Cmd> PikaClientConn::DoCmd(
       c_ptr->res().SetRes(CmdRes::kErrOther, "Server in read-only");
       return c_ptr;
     }
-    if (!g_pika_server->ConsensusCheck(current_table_, cur_key.front())) {
-      c_ptr->res().SetRes(CmdRes::kErrOther, "Consensus level not match");
+    if (!g_pika_server->ReadyForWrite(current_table_, cur_key.front())) {
+      c_ptr->res().SetRes(CmdRes::kErrOther, "Server is not ready for write operations");
+      return c_ptr;
     }
+    // In classic_mode or cluster mode with protocol_type equals to kClassicProtocol,
+    // we first write to DB and then append to binlog to increase concurrency.
+    bool write_db_before_binlog = g_pika_conf->classic_mode()
+      || g_pika_conf->replication_protocol_type() == ReplicationProtocolType::kClassicProtocol;
+    c_ptr->SetStage(write_db_before_binlog ? Cmd::kNone : Cmd::kBinlogStage);
   }
 
   // Process Command
@@ -126,9 +131,6 @@ std::shared_ptr<Cmd> PikaClientConn::DoCmd(
 
   if (g_pika_conf->slowlog_slower_than() >= 0) {
     ProcessSlowlog(argv, start_us);
-  }
-  if (g_pika_conf->consensus_level() != 0 && c_ptr->is_write()) {
-    c_ptr->SetStage(Cmd::kExecuteStage);
   }
 
   return c_ptr;
@@ -211,9 +213,17 @@ void PikaClientConn::DoExecTask(void* arg) {
   std::shared_ptr<PikaClientConn> conn_ptr = bg_arg->conn_ptr;
   std::shared_ptr<std::string> resp_ptr = bg_arg->resp_ptr;
   LogOffset offset = bg_arg->offset;
-  std::string table_name = bg_arg->table_name;
-  uint32_t partition_id = bg_arg->partition_id;
+  ReplicationGroupID group_id = bg_arg->group_id;
   delete bg_arg;
+
+  // Set response to client when an error occurs during the replication phase,
+  // which means that the system has rejected the current request.
+  if (!cmd_ptr->res().ok()) {
+    *resp_ptr = std::move(cmd_ptr->res().message());
+    conn_ptr->resp_num--;
+    conn_ptr->TryWriteResp();
+    return;
+  }
 
   uint64_t start_us = 0;
   if (g_pika_conf->slowlog_slower_than() >= 0) {
@@ -225,13 +235,13 @@ void PikaClientConn::DoExecTask(void* arg) {
     conn_ptr->ProcessSlowlog(cmd_ptr->argv(), start_us);
   }
 
-  std::shared_ptr<SyncMasterPartition> partition =
-    g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name, partition_id));
-  if (partition == nullptr) {
-    LOG(WARNING) << "Sync Master Partition not exist " << table_name << partition_id;
+  std::shared_ptr<ReplicationGroupNode> node = g_pika_server->GetReplicationGroupNode(group_id);
+  if (node == nullptr) {
+    LOG(WARNING) << "Sync Master Partition not exist " << group_id.ToString();
     return;
   }
-  partition->ConsensusUpdateAppliedIndex(offset);
+
+  node->Advance(Ready(offset, LogOffset(), false, false));
 
   if (conn_ptr == nullptr || resp_ptr == nullptr) {
     return;
@@ -269,7 +279,6 @@ void PikaClientConn::TryWriteResp() {
   }
 }
 
-
 void PikaClientConn::ExecRedisCmd(const PikaCmdArgsType& argv, std::shared_ptr<std::string> resp_ptr) {
   // get opt
   std::string opt = argv[0];
@@ -282,8 +291,12 @@ void PikaClientConn::ExecRedisCmd(const PikaCmdArgsType& argv, std::shared_ptr<s
   }
 
   std::shared_ptr<Cmd> cmd_ptr = DoCmd(argv, opt, resp_ptr);
-  // level == 0 or (cmd error) or (is_read)
-  if (g_pika_conf->consensus_level() == 0 || !cmd_ptr->res().ok() || !cmd_ptr->is_write()) {
+
+  bool done = g_pika_conf->classic_mode()
+      || g_pika_conf->replication_protocol_type() == ReplicationProtocolType::kClassicProtocol;
+  
+  // cmd error or is_read,
+  if (done || !cmd_ptr->res().ok() || !cmd_ptr->is_write()) {
     *resp_ptr = std::move(cmd_ptr->res().message());
     resp_num--;
   }

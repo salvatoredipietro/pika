@@ -7,7 +7,8 @@
 #define PIKA_CLIENT_CONN_H_
 
 #include "include/pika_command.h"
-
+#include "include/pika_define.h"
+#include "include/replication/pika_repl_rg_node.h"
 
 class PikaClientConn: public pink::RedisConn {
  public:
@@ -21,6 +22,7 @@ class PikaClientConn: public pink::RedisConn {
     LogOffset offset;
     std::string table_name;
     uint32_t partition_id;
+    ReplicationGroupID group_id;
   };
 
   // Auth related

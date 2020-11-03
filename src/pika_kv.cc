@@ -9,7 +9,6 @@
 
 #include "include/pika_conf.h"
 #include "include/pika_data_distribution.h"
-#include "include/pika_binlog_transverter.h"
 
 extern PikaConf *g_pika_conf;
 
@@ -102,45 +101,32 @@ void SetCmd::Do(std::shared_ptr<Partition> partition) {
   }
 }
 
-std::string SetCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
-  if (condition_ == SetCmd::kEXORPX) {
-    std::string content;
-    content.reserve(RAW_ARGS_LEN);
-    RedisAppendLen(content, 4, "*");
-
-    // to pksetexat cmd
-    std::string pksetexat_cmd("pksetexat");
-    RedisAppendLen(content, pksetexat_cmd.size(), "$");
-    RedisAppendContent(content, pksetexat_cmd);
-    // key
-    RedisAppendLen(content, key_.size(), "$");
-    RedisAppendContent(content, key_);
-    // time_stamp
-    char buf[100];
-    int32_t time_stamp = time(nullptr) + sec_;
-    slash::ll2string(buf, 100, time_stamp);
-    std::string at(buf);
-    RedisAppendLen(content, at.size(), "$");
-    RedisAppendContent(content, at);
-    // value
-    RedisAppendLen(content, value_.size(), "$");
-    RedisAppendContent(content, value_);
-    return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                               exec_time,
-                                               term_id,
-                                               logic_id,
-                                               filenum,
-                                               offset,
-                                               content,
-                                               {});
-  } else {
-    return Cmd::ToBinlog(exec_time, term_id, logic_id, filenum, offset);
+std::string SetCmd::ToBinlogContent() {
+  if (condition_ != SetCmd::kEXORPX) {
+    return Cmd::ToBinlogContent();
   }
+  std::string content;
+  content.reserve(RAW_ARGS_LEN);
+  RedisAppendLen(content, 4, "*");
+
+  // to pksetexat cmd
+  std::string pksetexat_cmd("pksetexat");
+  RedisAppendLen(content, pksetexat_cmd.size(), "$");
+  RedisAppendContent(content, pksetexat_cmd);
+  // key
+  RedisAppendLen(content, key_.size(), "$");
+  RedisAppendContent(content, key_);
+  // time_stamp
+  char buf[100];
+  int32_t time_stamp = time(nullptr) + sec_;
+  slash::ll2string(buf, 100, time_stamp);
+  std::string at(buf);
+  RedisAppendLen(content, at.size(), "$");
+  RedisAppendContent(content, at);
+  // value
+  RedisAppendLen(content, value_.size(), "$");
+  RedisAppendContent(content, value_);
+  return std::move(content);
 }
 
 void GetCmd::DoInitial() {
@@ -183,22 +169,6 @@ void DelCmd::Do(std::shared_ptr<Partition> partition) {
   } else {
     res_.SetRes(CmdRes::kErrOther, "delete error");
   }
-  return;
-}
-
-void DelCmd::Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {
-  std::map<blackwidow::DataType, blackwidow::Status> type_status;
-  int64_t count = partition->db()->Del(hint_keys.keys, &type_status);
-  if (count >= 0) {
-    split_res_ += count;
-  } else {
-    res_.SetRes(CmdRes::kErrOther, "delete error");
-  }
-  return;
-}
-
-void DelCmd::Merge() {
-  res_.AppendInteger(split_res_);
   return;
 }
 
@@ -385,7 +355,6 @@ void MgetCmd::DoInitial() {
   }
   keys_ = argv_;
   keys_.erase(keys_.begin());
-  split_res_.resize(keys_.size());
   return;
 }
 
@@ -406,36 +375,6 @@ void MgetCmd::Do(std::shared_ptr<Partition> partition) {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
   return;
-}
-
-void MgetCmd::Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {
-  std::vector<blackwidow::ValueStatus> vss;
-  const std::vector<std::string>& keys = hint_keys.keys;
-  rocksdb::Status s = partition->db()->MGet(keys, &vss);
-  if (s.ok()) {
-    if (hint_keys.hints.size() != vss.size()) {
-      res_.SetRes(CmdRes::kErrOther, "internal Mget return size invalid");
-    }
-    const std::vector<int>& hints = hint_keys.hints;
-    for (size_t i = 0; i < vss.size(); ++i) {
-      split_res_[hints[i]] = vss[i];
-    }
-  } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
-  }
-  return;
-}
-
-void MgetCmd::Merge() {
-  res_.AppendArrayLen(split_res_.size());
-  for (const auto& vs : split_res_) {
-    if (vs.status.ok()) {
-      res_.AppendStringLen(vs.value.size());
-      res_.AppendContent(vs.value);
-    } else {
-      res_.AppendContent("$-1");
-    }
-  }
 }
 
 void KeysCmd::DoInitial() {
@@ -511,12 +450,7 @@ void SetnxCmd::Do(std::shared_ptr<Partition> partition) {
   return;
 }
 
-std::string SetnxCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
+std::string SetnxCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, 3, "*");
@@ -532,15 +466,7 @@ std::string SetnxCmd::ToBinlog(
   // value
   RedisAppendLen(content, value_.size(), "$");
   RedisAppendContent(content, value_);
-
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void SetexCmd::DoInitial() {
@@ -566,13 +492,7 @@ void SetexCmd::Do(std::shared_ptr<Partition> partition) {
   }
 }
 
-std::string SetexCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
-
+std::string SetexCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, 4, "*");
@@ -594,14 +514,7 @@ std::string SetexCmd::ToBinlog(
   // value
   RedisAppendLen(content, value_.size(), "$");
   RedisAppendContent(content, value_);
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void PsetexCmd::DoInitial() {
@@ -627,13 +540,7 @@ void PsetexCmd::Do(std::shared_ptr<Partition> partition) {
   }
 }
 
-std::string PsetexCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
-
+std::string PsetexCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, 4, "*");
@@ -655,14 +562,7 @@ std::string PsetexCmd::ToBinlog(
   // value
   RedisAppendLen(content, value_.size(), "$");
   RedisAppendContent(content, value_);
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void DelvxCmd::DoInitial() {
@@ -708,33 +608,6 @@ void MsetCmd::Do(std::shared_ptr<Partition> partition) {
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-}
-
-void MsetCmd::Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {
-  std::vector<blackwidow::KeyValue> kvs;
-  const std::vector<std::string>& keys = hint_keys.keys;
-  const std::vector<int>& hints = hint_keys.hints;
-  if (keys.size() != hints.size()) {
-    res_.SetRes(CmdRes::kErrOther, "SplitError hint_keys size not match");
-  }
-  for (size_t i = 0; i < keys.size(); i++) {
-    if (kvs_[hints[i]].key == keys[i]) {
-      kvs.push_back(kvs_[hints[i]]);
-    } else {
-      res_.SetRes(CmdRes::kErrOther, "SplitError hint key: " + keys[i]);
-      return;
-    }
-  }
-  blackwidow::Status s = partition->db()->MSet(kvs);
-  if (s.ok()) {
-    res_.SetRes(CmdRes::kOk);
-  } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
-    return;
-  }
-}
-
-void MsetCmd::Merge() {
 }
 
 void MsetnxCmd::DoInitial() {
@@ -858,21 +731,6 @@ void ExistsCmd::Do(std::shared_ptr<Partition> partition) {
   return;
 }
 
-void ExistsCmd::Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {
-  std::map<blackwidow::DataType, rocksdb::Status> type_status;
-  int64_t res = partition->db()->Exists(hint_keys.keys, &type_status);
-  if (res != -1) {
-    split_res_ += res;
-  } else {
-    res_.SetRes(CmdRes::kErrOther, "exists internal error");
-  }
-}
-
-void ExistsCmd::Merge() {
-  res_.AppendInteger(split_res_);
-  return;
-}
-
 void ExpireCmd::DoInitial() {
   if (!CheckArg(argv_.size())) {
     res_.SetRes(CmdRes::kWrongNum, kCmdNameExpire);
@@ -897,12 +755,7 @@ void ExpireCmd::Do(std::shared_ptr<Partition> partition) {
   return;
 }
 
-std::string ExpireCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
+std::string ExpireCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, 3, "*");
@@ -921,15 +774,7 @@ std::string ExpireCmd::ToBinlog(
   std::string at(buf);
   RedisAppendLen(content, at.size(), "$");
   RedisAppendContent(content, at);
-
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void PexpireCmd::DoInitial() {
@@ -956,12 +801,7 @@ void PexpireCmd::Do(std::shared_ptr<Partition> partition) {
   return;
 }
 
-std::string PexpireCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
+std::string PexpireCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, argv_.size(), "*");
@@ -980,15 +820,7 @@ std::string PexpireCmd::ToBinlog(
   std::string at(buf);
   RedisAppendLen(content, at.size(), "$");
   RedisAppendContent(content, at);
-
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void ExpireatCmd::DoInitial() {
@@ -1027,12 +859,7 @@ void PexpireatCmd::DoInitial() {
   return;
 }
 
-std::string PexpireatCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
+std::string PexpireatCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, argv_.size(), "*");
@@ -1050,16 +877,7 @@ std::string PexpireatCmd::ToBinlog(
   slash::ll2string(buf, 100, expireat);
   std::string at(buf);
   RedisAppendLen(content, at.size(), "$");
-  RedisAppendContent(content, at);
-
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void PexpireatCmd::Do(std::shared_ptr<Partition> partition) {

@@ -13,8 +13,8 @@ PikaClientProcessor::PikaClientProcessor(
       worker_num, max_queue_size, name_prefix + "Pool");
   for (size_t i = 0; i < worker_num; ++i) {
     pink::BGThread* bg_thread = new pink::BGThread(max_queue_size);
-    bg_threads_.push_back(bg_thread);
     bg_thread->set_thread_name(name_prefix + "BgThread");
+    bg_threads_.push_back(bg_thread);
   }
 }
 
@@ -64,4 +64,3 @@ size_t PikaClientProcessor::ThreadPoolCurQueueSize() {
   }
   return cur_size;
 }
-

@@ -54,6 +54,7 @@ PLATFORM_CXXFLAGS += $(TCMALLOC_EXTENSION_FLAGS)
 OUTPUT = $(CURDIR)/output
 THIRD_PATH = $(CURDIR)/third
 SRC_PATH = $(CURDIR)/src
+PROTO_PATH = $(CURDIR)/proto
 
 # ----------------Dependences-------------------
 
@@ -80,7 +81,6 @@ ifndef BLACKWIDOW_PATH
 BLACKWIDOW_PATH = $(THIRD_PATH)/blackwidow
 endif
 BLACKWIDOW = $(BLACKWIDOW_PATH)/lib/libblackwidow$(DEBUG_SUFFIX).a
-
 
 ifeq ($(360), 1)
 GLOG := $(GLOG_PATH)/.libs/libglog.a
@@ -118,12 +118,18 @@ LDFLAGS += $(LIB_PATH) \
 # ---------------End Dependences----------------
 
 VERSION_CC=$(SRC_PATH)/build_version.cc
+
 LIB_SOURCES :=  $(VERSION_CC) \
-				$(filter-out $(VERSION_CC), $(wildcard $(SRC_PATH)/*.cc))
+				$(filter-out $(VERSION_CC), $(wildcard $(SRC_PATH)/*.cc)) \
+				$(wildcard $(SRC_PATH)/replication/classic/*.cc) \
+				$(wildcard $(SRC_PATH)/replication/cluster/*.cc) \
+				$(wildcard $(SRC_PATH)/replication/*.cc) \
+				$(wildcard $(SRC_PATH)/util/*.cc) \
+				$(wildcard $(SRC_PATH)/common/*.cc) \
+				$(wildcard $(SRC_PATH)/storage/*.cc)
 
-PIKA_PROTO := $(wildcard $(SRC_PATH)/*.proto)
+PIKA_PROTO := $(wildcard $(PROTO_PATH)/*.proto)
 PIKA_PROTO_GENS:= $(PIKA_PROTO:%.proto=%.pb.h) $(PIKA_PROTO:%.proto=%.pb.cc)
-
 
 #-----------------------------------------------
 
@@ -199,7 +205,7 @@ BINARY = ${BINNAME}
 .PHONY: distclean clean dbg all
 
 %.pb.h %.pb.cc: %.proto
-	$(AM_V_GEN)protoc --proto_path=$(SRC_PATH) --cpp_out=$(SRC_PATH) $<
+	$(AM_V_GEN)protoc --proto_path=$(PROTO_PATH) --cpp_out=$(PROTO_PATH) $<
 
 %.o: %.cc
 	$(AM_V_CC)$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -217,7 +223,6 @@ $(BINARY): $(SLASH) $(PINK) $(ROCKSDB) $(BLACKWIDOW) $(GLOG) $(PROTOOBJECTS) $(L
 	$(AM_V_at)mkdir -p $(OUTPUT)/bin
 	$(AM_V_at)mv $@ $(OUTPUT)/bin
 	$(AM_V_at)cp -r $(CURDIR)/conf $(OUTPUT)
-	
 
 $(SLASH):
 	$(AM_V_at)make -C $(SLASH_PATH)/slash/ DEBUG_LEVEL=$(DEBUG_LEVEL)
@@ -238,6 +243,7 @@ clean:
 	rm -rf $(OUTPUT)
 	rm -rf $(CLEAN_FILES)
 	rm -rf $(PIKA_PROTO_GENS)
+	find $(PROTO_PATH) -name "*.[oda]*" -exec rm -f {} \;
 	find $(SRC_PATH) -name "*.[oda]*" -exec rm -f {} \;
 	find $(SRC_PATH) -type f -regex ".*\.\(\(gcda\)\|\(gcno\)\)" -exec rm {} \;
 

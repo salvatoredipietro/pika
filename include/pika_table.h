@@ -16,7 +16,8 @@ class Table : public std::enable_shared_from_this<Table>{
   Table(const std::string& table_name,
         uint32_t partition_num,
         const std::string& db_path,
-        const std::string& log_path);
+        const std::string& log_path,
+        const std::shared_ptr<blackwidow::BlackWidow>& state_db);
   virtual ~Table();
 
   friend class Cmd;
@@ -78,6 +79,8 @@ class Table : public std::enable_shared_from_this<Table>{
   void InitKeyScan();
   slash::Mutex key_scan_protector_;
   KeyScanInfo key_scan_info_;
+
+  std::shared_ptr<blackwidow::BlackWidow> state_db_;
 
   /*
    * No allowed copy and copy assign

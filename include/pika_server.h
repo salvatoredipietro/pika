@@ -7,6 +7,7 @@
 #define PIKA_SERVER_H_
 
 #include <sys/statfs.h>
+#include <vector>
 #include <memory>
 
 #include "slash/include/slash_mutex.h"
@@ -18,21 +19,34 @@
 #include "blackwidow/blackwidow.h"
 #include "blackwidow/backupable.h"
 
-#include "include/pika_conf.h"
 #include "include/pika_table.h"
-#include "include/pika_binlog.h"
-#include "include/pika_define.h"
 #include "include/pika_monitor_thread.h"
 #include "include/pika_rsync_service.h"
 #include "include/pika_dispatch_thread.h"
-#include "include/pika_repl_client.h"
-#include "include/pika_repl_server.h"
-#include "include/pika_auxiliary_thread.h"
 #include "include/pika_client_processor.h"
+#include "include/pika_apply_processor.h"
 #include "include/pika_statistic.h"
+#include "include/pika_conf.h"
+#include "include/pika_define.h"
+#include "include/storage/pika_binlog.h"
+#include "include/replication/pika_memory_log.h"
+#include "include/replication/pika_repl_manager.h"
+#include "include/replication/pika_repl_rg_node.h"
+#include "include/replication/pika_configuration.h"
+#include "include/replication/classic/pika_classic_repl_manager.h"
+#include "include/replication/cluster/pika_cluster_repl_manager.h"
 
 using slash::Status;
 using slash::Slice;
+
+using replication::Configuration;
+using replication::SnapshotSyncClosure;
+using replication::SanityCheckFilter;
+using replication::GroupIDAndInitConfMap;
+using replication::ReplicationManager;
+using replication::ReplicationGroupNode;
+using replication::ReplicationManagerOptions;
+using LogItem = replication::MemLog::LogItem;
 
 /*
 static std::set<std::string> MultiKvCommands {kCmdNameDel,
@@ -48,9 +62,9 @@ static std::set<std::string> MultiKvCommands {kCmdNameDel,
              kCmdNameGeoRadius,   kCmdNameGeoRadiusByMember};
 */
 
-static std::set<std::string> ConsensusNotSupportCommands {
+static std::set<std::string> ClusterNotSupportCommands {
              kCmdNameMsetnx,      kCmdNameScan,              kCmdNameKeys,
-             kCmdNameRPopLPush,   kCmdNameZUnionstore,       kCmdNameZInterstore,
+             kCmdNameScanx,       kCmdNameZUnionstore,       kCmdNameZInterstore,
              kCmdNameSUnion,      kCmdNameSUnionstore,       kCmdNameSInter,
              kCmdNameSInterstore, kCmdNameSDiff,             kCmdNameSDiffstore,
              kCmdNameSMove,       kCmdNameBitOp,             kCmdNamePfAdd,
@@ -58,8 +72,9 @@ static std::set<std::string> ConsensusNotSupportCommands {
              kCmdNameGeoPos,      kCmdNameGeoDist,           kCmdNameGeoHash,
              kCmdNameGeoRadius,   kCmdNameGeoRadiusByMember, kCmdNamePKPatternMatchDel,
              kCmdNameSlaveof,     kCmdNameDbSlaveof,         kCmdNameMset,
-             kCmdNameMget,        kCmdNameScanx};
+             kCmdNameMget,        kCmdNameRPopLPush};
 
+/*
 static std::set<std::string> ShardingModeNotSupportCommands {
              kCmdNameMsetnx,      kCmdNameScan,              kCmdNameKeys,
              kCmdNameScanx,       kCmdNameZUnionstore,       kCmdNameZInterstore,
@@ -70,6 +85,7 @@ static std::set<std::string> ShardingModeNotSupportCommands {
              kCmdNameGeoPos,      kCmdNameGeoDist,           kCmdNameGeoHash,
              kCmdNameGeoRadius,   kCmdNameGeoRadiusByMember, kCmdNamePKPatternMatchDel,
              kCmdNameSlaveof,     kCmdNameDbSlaveof};
+*/
 
 
 extern PikaConf *g_pika_conf;
@@ -81,17 +97,36 @@ enum TaskType {
   kCompactSets,
   kCompactZSets,
   kCompactList,
-  kResetReplState,
   kPurgeLog,
   kStartKeyScan,
   kStopKeyScan,
   kBgSave,
 };
 
-class PikaServer {
+class PikaServer : public replication::StateMachine {
  public:
   PikaServer();
   ~PikaServer();
+
+  /*
+   * Implement replication::StateMachine
+   */
+  virtual void OnStop(const ReplicationGroupID& group_id) override {}
+  virtual void OnReplError(const ReplicationGroupID& group_id,
+                           const Status& status) override;
+  virtual void OnLeaderChanged(const ReplicationGroupID& group_id,
+                               const PeerID& leader_id) override;
+  virtual void OnApply(std::vector<LogItem> logs) override;
+  virtual Status OnSnapshotSyncStart(const ReplicationGroupID& group_id) override;
+  virtual Status CheckSnapshotReceived(const std::shared_ptr<ReplicationGroupNode>& node,
+                                       LogOffset* snapshot_offset) override;
+  virtual void TrySendSnapshot(const PeerID& peer_id,
+                               const ReplicationGroupID& group_id,
+                               const std::string& logger_filename,
+                               int32_t top, SnapshotSyncClosure* closure) override;
+  virtual void PurgeDir(const std::string& path) override;
+  virtual void PurgelogsTaskSchedule(void (*function)(void*), void* arg) override;
+  virtual void ReportLogAppendError(const ReplicationGroupID& group_id) override;
 
   /*
    * Server init info
@@ -104,15 +139,8 @@ class PikaServer {
   std::string host();
   int port();
   time_t start_time_s();
-  std::string master_ip();
-  int master_port();
-  int role();
   bool readonly(const std::string& table, const std::string& key);
-  bool ConsensusCheck(const std::string& table_name, const std::string& key);
-  int repl_state();
-  std::string repl_state_str();
-  bool force_full_sync();
-  void SetForceFullSync(bool v);
+  bool ReadyForWrite(const std::string& table_name, const std::string& key);
   void SetDispatchQueueLimit(int queue_limit);
   blackwidow::BlackwidowOptions bw_options();
 
@@ -122,6 +150,7 @@ class PikaServer {
   void InitTableStruct();
   Status AddTableStruct(std::string table_name, uint32_t num);
   Status DelTableStruct(std::string table_name);
+  Status DelTableLog(const std::string& table_name);
   std::shared_ptr<Table> GetTable(const std::string& table_name);
   std::set<uint32_t> GetTablePartitionIds(const std::string& table_name);
   bool IsBgSaving();
@@ -136,56 +165,50 @@ class PikaServer {
   /*
    * Partition use
    */
-  void PreparePartitionTrySync();
   void PartitionSetMaxCacheStatisticKeys(uint32_t max_cache_statistic_keys);
   void PartitionSetSmallCompactionThreshold(uint32_t small_compaction_threshold);
-  bool GetTablePartitionBinlogOffset(const std::string& table_name,
-                                     uint32_t partition_id,
-                                     BinlogOffset* const boffset);
   std::shared_ptr<Partition> GetPartitionByDbName(const std::string& db_name);
-  std::shared_ptr<Partition> GetTablePartitionById(
-                                  const std::string& table_name,
-                                  uint32_t partition_id);
+  std::shared_ptr<Partition> GetTablePartitionById(const std::string& table_name,
+                                                   uint32_t partition_id);
   std::shared_ptr<Partition> GetTablePartitionByKey(
                                   const std::string& table_name,
                                   const std::string& key);
   Status DoSameThingEveryPartition(const TaskType& type);
 
   /*
-   * Master use
+   * Master & Slave mode used
    */
-  void BecomeMaster();
-  void DeleteSlave(int fd);   //conn fd
+  bool IsMaster();
+  bool IsSlave();
   int32_t CountSyncSlaves();
-  int32_t GetSlaveListString(std::string& slave_list_str);
-  int32_t GetShardingSlaveListString(std::string& slave_list_str);
-  bool TryAddSlave(const std::string& ip, int64_t port, int fd,
-                   const std::vector<TableStruct>& table_structs);
-  slash::Mutex slave_mutex_; // protect slaves_;
-  std::vector<SlaveItem> slaves_;
-
-
-  /*
-   * Slave use
-   */
-  void SyncError();
+  void CurrentMaster(std::string& master_ip, int& master_port);
   void RemoveMaster();
-  bool SetMaster(std::string& master_ip, int master_port);
-
+  Status SetMaster(const std::string& master_ip, int master_port,
+                   bool force_full_sync);
+  Status ResetMaster(const std::set<ReplicationGroupID>& group_ids,
+                     const PeerID& master_id, bool force_full_sync);
+  Status DisableMasterForReplicationGroup(const ReplicationGroupID& group_id);
+  Status EnableMasterForReplicationGroup(const ReplicationGroupID& group_id,
+      bool force_full_sync, bool reset_file_offset, uint32_t filenum, uint64_t offset);
+ 
   /*
-   * Slave State Machine
+   * Replication used
    */
-  bool ShouldMetaSync();
-  void FinishMetaSync();
-  bool MetaSyncDone();
-  void ResetMetaSyncStatus();
-  bool AllPartitionConnectSuccess();
-  bool LoopPartitionStateMachine();
-  void SetLoopPartitionStateMachine(bool need_loop);
-  int GetMetaSyncTimestamp();
-  void UpdateMetaSyncTimestamp();
-  bool IsFirstMetaSync();
-  void SetFirstMetaSync(bool v);
+  void InfoReplication(std::string& info);
+  void ReplicationStatus(std::string& info);
+  Status GetReplicationGroupInfo(const ReplicationGroupID& group_id, std::stringstream& stream);
+  Status CreateReplicationGroupNodes(const std::set<ReplicationGroupID>& group_ids);
+  Status CreateReplicationGroupNodes(const GroupIDAndInitConfMap& id_init_conf_map);
+  Status CreateReplicationGroupNodesSanityCheck(const std::set<ReplicationGroupID>& group_ids);
+  Status CreateReplicationGroupNodesSanityCheck(const GroupIDAndInitConfMap& id_init_conf_map);
+  Status RemoveReplicationGroupNodes(const std::set<ReplicationGroupID>& group_ids);
+  Status RemoveReplicationGroupNodesSanityCheck(const std::set<ReplicationGroupID>& group_ids);
+  Status ReplicationGroupNodesSantiyCheck(const SanityCheckFilter& filter);
+  std::shared_ptr<ReplicationGroupNode> GetReplicationGroupNode(const std::string& table_name,
+                                                                uint32_t partition_id);
+  std::shared_ptr<ReplicationGroupNode> GetReplicationGroupNode(const ReplicationGroupID& group_id);
+  Status StartReplicationGroupNode(const ReplicationGroupID& group_id);
+  Status StopReplicationGroupNode(const ReplicationGroupID& group_id);
 
   /*
    * PikaClientProcessor Process Task
@@ -203,29 +226,25 @@ class PikaServer {
   /*
    * PurgeLog used
    */
-  void PurgelogsTaskSchedule(pink::TaskFunc func, void* arg);
-
-  /*
-   * Flushall & Flushdb used
-   */
-  void PurgeDir(const std::string& path);
   void PurgeDirTaskSchedule(void (*function)(void*), void* arg);
+  Status PurgeLogs(const ReplicationGroupID& group_id,
+                   uint32_t to,
+                   bool manual);
 
   /*
-   * DBSync used
+   * SnapshotSync used
    */
-  void DBSync(const std::string& ip, int port,
-              const std::string& table_name,
-              uint32_t partition_id);
-  void TryDBSync(const std::string& ip, int port,
-                 const std::string& table_name,
-                 uint32_t partition_id, int32_t top);
-  void DbSyncSendFile(const std::string& ip, int port,
-                      const std::string& table_name,
-                      uint32_t partition_id);
-  std::string DbSyncTaskIndex(const std::string& ip, int port,
-                              const std::string& table_name,
-                              uint32_t partition_id);
+  void SnapshotSync(const std::string& ip, int port,
+                    const std::string& table_name,
+                    uint32_t partition_id,
+                    SnapshotSyncClosure* closure);
+  void SnapshotSyncSendFile(const std::string& ip, int port,
+                            const std::string& table_name,
+                            uint32_t partition_id,
+                            SnapshotSyncClosure* closure);
+  std::string SnapshotSyncTaskIndex(const std::string& ip, int port,
+                                    const std::string& table_name,
+                                    uint32_t partition_id);
 
   /*
    * Keyscan used
@@ -270,12 +289,6 @@ class PikaServer {
   std::unordered_map<std::string, uint64_t> ServerExecCountTable();
   QpsStatistic ServerTableStat(const std::string& table_name);
   std::unordered_map<std::string, QpsStatistic> ServerAllTableStat();
-  /*
-   * Slave to Master communication used
-   */
-  int SendToPeer();
-  void SignalAuxiliary();
-  Status TriggerSendBinlogSync();
 
   /*
    * PubSub used
@@ -303,7 +316,7 @@ class PikaServer {
    * BlackwidowOptions used
    */
   blackwidow::Status RewriteBlackwidowOptions(const blackwidow::OptionType& option_type,
-                                  const std::unordered_map<std::string, std::string>& options);
+                                              const std::unordered_map<std::string, std::string>& options);
 
   friend class Cmd;
   friend class InfoCmd;
@@ -313,6 +326,7 @@ class PikaServer {
   friend class PkClusterDelTableCmd;
   friend class PikaReplClientConn;
   friend class PkClusterInfoCmd;
+  friend class PikaApplyProcessor;
 
  private:
   /*
@@ -331,6 +345,7 @@ class PikaServer {
   pthread_rwlock_t bw_options_rw_;
   blackwidow::BlackwidowOptions bw_options_;
   void InitBlackwidowOptions();
+  std::shared_ptr<blackwidow::BlackWidow> state_db_;
 
   std::atomic<bool> exit_;
 
@@ -354,19 +369,11 @@ class PikaServer {
   PikaClientProcessor* pika_client_processor_;
   PikaDispatchThread* pika_dispatch_thread_;
 
-
   /*
-   * Slave used
+   * Replication used
    */
-  std::string master_ip_;
-  int master_port_;
-  int repl_state_;
-  int role_;
-  int last_meta_sync_timestamp_;
-  bool first_meta_sync_;
-  bool loop_partition_state_machine_;
-  bool force_full_sync_;
-  pthread_rwlock_t state_protector_; //protect below, use for master-slave mode
+  ReplicationManager* pika_rm_;
+  PikaApplyProcessor* pika_apply_processor_;
 
   /*
    * Bgsave used
@@ -405,11 +412,6 @@ class PikaServer {
   pink::PubSubThread* pika_pubsub_thread_;
 
   /*
-   * Communication used
-   */
-  PikaAuxiliaryThread* pika_auxiliary_thread_;
-
-  /*
    * Slowlog used
    */
   uint64_t slowlog_entry_id_;
@@ -423,6 +425,41 @@ class PikaServer {
 
   PikaServer(PikaServer &ps);
   void operator =(const PikaServer &ps);
+};
+
+class FileBasedReplicationOptionsStorage : public replication::ReplicationOptionsStorage {
+ public:
+  FileBasedReplicationOptionsStorage(const PeerID& local_id,
+                                     PikaConf* pika_conf)
+    : local_id_(local_id), pika_conf_(pika_conf) { }
+  ~FileBasedReplicationOptionsStorage() = default;
+
+  virtual std::string slaveof() override { return pika_conf_->slaveof(); }
+  virtual bool slave_read_only() override { return pika_conf_->slave_read_only(); }
+  virtual int slave_priority() override { return pika_conf_->slave_priority(); }
+  virtual std::string masterauth() override { return pika_conf_->masterauth(); }
+  virtual std::string requirepass() override { return pika_conf_->requirepass(); }
+  virtual const std::vector<TableStruct>& table_structs() override { return pika_conf_->table_structs(); }
+  virtual bool classic_mode() override { return pika_conf_->classic_mode(); }
+  virtual ReplicationProtocolType replication_protocol_type() override { return pika_conf_->replication_protocol_type(); }
+  virtual int expire_logs_nums() override { return pika_conf_->expire_logs_nums(); }
+  virtual int expire_logs_days() override { return pika_conf_->expire_logs_days(); }
+  virtual int sync_window_size() override { return pika_conf_->sync_window_size(); }
+  virtual int sync_thread_num() override { return pika_conf_->sync_thread_num(); }
+  virtual int binlog_file_size() override { return pika_conf_->binlog_file_size(); }
+  virtual std::string log_path() override { return pika_conf_->log_path(); }
+  virtual int max_conn_rbuf_size() override { return pika_conf_->max_conn_rbuf_size(); }
+
+  virtual void SetWriteBinlog(const std::string& value) override { pika_conf_->SetWriteBinlog(value); }
+  virtual PeerID local_id() override { return local_id_; }
+  virtual bool check_quorum() override { return pika_conf_->check_quorum(); }
+  virtual bool pre_vote() override { return pika_conf_->pre_vote(); } 
+  virtual uint64_t heartbeat_timeout_ms() override { return pika_conf_->heartbeat_timeout_ms(); }
+  virtual uint64_t election_timeout_ms() override { return pika_conf_->election_timeout_ms(); }
+
+ private:
+  const PeerID local_id_;
+  PikaConf* const pika_conf_;
 };
 
 #endif

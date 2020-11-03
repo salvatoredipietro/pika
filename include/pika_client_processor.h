@@ -30,4 +30,5 @@ class PikaClientProcessor {
   pink::ThreadPool* pool_;
   std::vector<pink::BGThread*> bg_threads_;
 };
+
 #endif  // PIKA_CLIENT_PROCESSOR_H_

@@ -11,8 +11,8 @@
 #include "slash/include/env.h"
 #include "slash/include/rsync.h"
 
-#include "include/pika_define.h"
 #include "include/pika_conf.h"
+#include "include/pika_define.h"
 
 extern PikaConf *g_pika_conf;
 
@@ -43,7 +43,7 @@ int PikaRsyncService::StartRsync() {
   } else {
     auth = g_pika_conf->masterauth();
   }
-  ret = slash::StartRsync(raw_path_, kDBSyncModule, "0.0.0.0", port_, auth);
+  ret = slash::StartRsync(raw_path_, kSnapshotSyncModule, "0.0.0.0", port_, auth);
   if (ret != 0) {
     LOG(WARNING) << "Failed to start rsync, path:" << raw_path_ << " error : " << ret;
     return -1;

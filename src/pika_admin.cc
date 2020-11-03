@@ -11,19 +11,21 @@
 
 #include "slash/include/rsync.h"
 
-#include "include/pika_conf.h"
 #include "include/pika_server.h"
-#include "include/pika_rm.h"
 #include "include/pika_version.h"
 #include "include/build_version.h"
+#include "include/pika_conf.h"
 
 #ifdef TCMALLOC_EXTENSION
 #include <gperftools/malloc_extension.h>
 #endif
 
+using storage::kBlockSize;
+using storage::kHeaderSize;
+using storage::BINLOG_ITEM_HEADER_SIZE;
+
 extern PikaServer *g_pika_server;
 extern PikaConf *g_pika_conf;
-extern PikaReplicaManager *g_pika_rm;
 
 static std::string ConstructPinginPubSubResp(const PikaCmdArgsType &argv) {
   if (argv.size() > 2) {
@@ -67,7 +69,7 @@ void SlaveofCmd::DoInitial() {
   }
 
   // self is master of A , want to slavof B
-  if (g_pika_server->role() & PIKA_ROLE_MASTER) {
+  if (g_pika_server->IsMaster()) {
     res_.SetRes(CmdRes::kErrOther, "already master of others, invalid usage");
     return;
   }
@@ -87,7 +89,7 @@ void SlaveofCmd::DoInitial() {
 
   if (argv_.size() == 4) {
     if (!strcasecmp(argv_[3].data(), "force")) {
-      g_pika_server->SetForceFullSync(true);
+      force_full_sync_ = true;
     } else {
       res_.SetRes(CmdRes::kWrongNum, kCmdNameSlaveof);
     }
@@ -95,9 +97,12 @@ void SlaveofCmd::DoInitial() {
 }
 
 void SlaveofCmd::Do(std::shared_ptr<Partition> partition) {
+  std::string master_ip;
+  int master_port;
+  g_pika_server->CurrentMaster(master_ip, master_port);
   // Check if we are already connected to the specified master
-  if ((master_ip_ == "127.0.0.1" || g_pika_server->master_ip() == master_ip_)
-    && g_pika_server->master_port() == master_port_) {
+  if ((master_ip_ == "127.0.0.1" || master_ip == master_ip_)
+    && master_port == master_port_) {
     res_.SetRes(CmdRes::kOk);
     return;
   }
@@ -110,12 +115,11 @@ void SlaveofCmd::Do(std::shared_ptr<Partition> partition) {
     return;
   }
 
-  bool sm_ret = g_pika_server->SetMaster(master_ip_, master_port_);
+  Status s = g_pika_server->SetMaster(master_ip_, master_port_, force_full_sync_);
 
-  if (sm_ret) {
+  if (s.ok()) {
     res_.SetRes(CmdRes::kOk);
     g_pika_conf->SetSlaveof(master_ip_ + ":" + std::to_string(master_port_));
-    g_pika_server->SetFirstMetaSync(true);
   } else {
     res_.SetRes(CmdRes::kErrOther, "Server is not in correct state for slaveof");
   }
@@ -136,8 +140,7 @@ void DbSlaveofCmd::DoInitial() {
     res_.SetRes(CmdRes::kErrOther, "DbSlaveof only support on classic mode");
     return;
   }
-  if (g_pika_server->role() ^ PIKA_ROLE_SLAVE
-    || !g_pika_server->MetaSyncDone()) {
+  if (!g_pika_server->IsSlave()) {
     res_.SetRes(CmdRes::kErrOther, "Not currently a slave");
     return;
   }
@@ -179,34 +182,15 @@ void DbSlaveofCmd::DoInitial() {
 }
 
 void DbSlaveofCmd::Do(std::shared_ptr<Partition> partition) {
-  std::shared_ptr<SyncSlavePartition> slave_partition =
-      g_pika_rm->GetSyncSlavePartitionByName(PartitionInfo(db_name_, 0));
-  if (!slave_partition) {
-    res_.SetRes(CmdRes::kErrOther, "Db not found");
-    return;
-  }
-
+  // In classic mode a table has only one partition
+  const ReplicationGroupID group_id(db_name_, 0);
   Status s;
   if (is_noone_) {
-    // In classic mode a table has only one partition
-    s = g_pika_rm->SendRemoveSlaveNodeRequest(db_name_, 0);
+    s = g_pika_server->DisableMasterForReplicationGroup(group_id);
   } else {
-    if (slave_partition->State() == ReplState::kNoConnect
-      || slave_partition->State() == ReplState::kError
-      || slave_partition->State() == ReplState::kDBNoConnect) {
-      if (have_offset_) {
-        std::shared_ptr<SyncMasterPartition> db_partition =
-          g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(db_name_, 0));
-        db_partition->Logger()->SetProducerStatus(filenum_, offset_);
-      }
-      ReplState state = force_sync_
-          ? ReplState::kTryDBSync : ReplState::kTryConnect;
-      s = g_pika_rm->ActivateSyncSlavePartition(
-          RmNode(g_pika_server->master_ip(), g_pika_server->master_port(),
-            db_name_, 0), state);
-    }
+    s = g_pika_server->EnableMasterForReplicationGroup(group_id, force_sync_,
+        have_offset_, filenum_, offset_);
   }
-
   if (s.ok()) {
     res_.SetRes(CmdRes::kOk);
   } else {
@@ -356,11 +340,12 @@ void PurgelogstoCmd::DoInitial() {
 }
 
 void PurgelogstoCmd::Do(std::shared_ptr<Partition> partition) {
-  std::shared_ptr<SyncMasterPartition> sync_partition = g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_, 0));
-  if (!sync_partition) {
+  Status s = g_pika_server->PurgeLogs(ReplicationGroupID(table_, 0), num_, true);
+  if (s.IsNotFound()) {
     res_.SetRes(CmdRes::kErrOther, "Partition not found");
+  } else if (!s.ok()) {
+    res_.SetRes(CmdRes::kErrOther, "Server error");
   } else {
-    sync_partition->StableLogger()->PurgeStableLogs(num_, true);
     res_.SetRes(CmdRes::kOk);
   }
 }
@@ -437,12 +422,7 @@ void FlushallCmd::Do(std::shared_ptr<Partition> partition) {
 }
 
 // flushall convert flushdb writes to every partition binlog
-std::string FlushallCmd::ToBinlog(
-      uint32_t exec_time,
-      uint32_t term_id,
-      uint64_t logic_id,
-      uint32_t filenum,
-      uint64_t offset) {
+std::string FlushallCmd::ToBinlogContent() {
   std::string content;
   content.reserve(RAW_ARGS_LEN);
   RedisAppendLen(content, 1, "*");
@@ -451,14 +431,7 @@ std::string FlushallCmd::ToBinlog(
   std::string flushdb_cmd("flushdb");
   RedisAppendLen(content, flushdb_cmd.size(), "$");
   RedisAppendContent(content, flushdb_cmd);
-  return PikaBinlogTransverter::BinlogEncode(BinlogType::TypeFirst,
-                                             exec_time,
-                                             term_id,
-                                             logic_id,
-                                             filenum,
-                                             offset,
-                                             content,
-                                             {});
+  return std::move(content);
 }
 
 void FlushdbCmd::DoInitial() {
@@ -840,164 +813,12 @@ void InfoCmd::InfoCPU(std::string& info) {
   info.append(tmp_stream.str());
 }
 
-void InfoCmd::InfoShardingReplication(std::string& info) {
-  int role = 0;
-  std::string slave_list_string;
-  uint32_t slave_num =  g_pika_server->GetShardingSlaveListString(slave_list_string);
-  if (slave_num) {
-    role |=  PIKA_ROLE_MASTER;
-  }
-  std::string common_master;
-  std::string master_ip;
-  int master_port = 0;
-  g_pika_rm->FindCommonMaster(&common_master);
-  if (!common_master.empty()) {
-    role |=  PIKA_ROLE_SLAVE;
-    if (!slash::ParseIpPortString(common_master, master_ip, master_port)) {
-      return;
-    }
-  }
-
-  std::stringstream tmp_stream;
-  tmp_stream << "# Replication(";
-  switch (role) {
-    case PIKA_ROLE_SINGLE :
-    case PIKA_ROLE_MASTER : tmp_stream << "MASTER)\r\nrole:master\r\n"; break;
-    case PIKA_ROLE_SLAVE : tmp_stream << "SLAVE)\r\nrole:slave\r\n"; break;
-    case PIKA_ROLE_MASTER | PIKA_ROLE_SLAVE : tmp_stream << "Master && SLAVE)\r\nrole:master&&slave\r\n"; break;
-    default: info.append("ERR: server role is error\r\n"); return;
-  }
-  switch (role) {
-    case PIKA_ROLE_SLAVE :
-      tmp_stream << "master_host:" << master_ip << "\r\n";
-      tmp_stream << "master_port:" << master_port << "\r\n";
-      tmp_stream << "master_link_status:up"<< "\r\n";
-      tmp_stream << "slave_priority:" << g_pika_conf->slave_priority() << "\r\n";
-      break;
-    case PIKA_ROLE_MASTER | PIKA_ROLE_SLAVE :
-      tmp_stream << "master_host:" << master_ip << "\r\n";
-      tmp_stream << "master_port:" << master_port << "\r\n";
-      tmp_stream << "master_link_status:up"<< "\r\n";
-    case PIKA_ROLE_SINGLE :
-    case PIKA_ROLE_MASTER :
-      tmp_stream << "connected_slaves:" << slave_num << "\r\n" << slave_list_string;
-  }
-  info.append(tmp_stream.str());
-}
-
 void InfoCmd::InfoReplication(std::string& info) {
   if (!g_pika_conf->classic_mode()) {
-    // In Sharding mode, show different replication info
-    InfoShardingReplication(info);
+    // In Sharding mode, skip replication info
     return;
   }
-
-  int host_role = g_pika_server->role();
-  std::stringstream tmp_stream;
-  std::stringstream out_of_sync;
-
-  bool all_partition_sync = true;
-  slash::RWLock table_rwl(&g_pika_server->tables_rw_, false);
-  for (const auto& table_item : g_pika_server->tables_) {
-    slash::RWLock partition_rwl(&table_item.second->partitions_rw_, false);
-    for (const auto& partition_item : table_item.second->partitions_) {
-      std::shared_ptr<SyncSlavePartition> slave_partition =
-          g_pika_rm->GetSyncSlavePartitionByName(
-                  PartitionInfo(table_item.second->GetTableName(),
-                      partition_item.second->GetPartitionId()));
-      if (!slave_partition) {
-        out_of_sync << "(" << partition_item.second->GetPartitionName() << ": InternalError)";
-        continue;
-      }
-      if (slave_partition->State() != ReplState::kConnected) {
-        all_partition_sync = false;
-        out_of_sync << "(" << partition_item.second->GetPartitionName() << ":";
-        if (slave_partition->State() == ReplState::kNoConnect) {
-          out_of_sync << "NoConnect)";
-        } else if (slave_partition->State() == ReplState::kWaitDBSync) {
-          out_of_sync << "WaitDBSync)";
-        } else if (slave_partition->State() == ReplState::kError) {
-          out_of_sync << "Error)";
-        } else if (slave_partition->State() == ReplState::kWaitReply) {
-          out_of_sync << "kWaitReply)";
-        } else if (slave_partition->State() == ReplState::kTryConnect) {
-          out_of_sync << "kTryConnect)";
-        } else if (slave_partition->State() == ReplState::kTryDBSync) {
-          out_of_sync << "kTryDBSync)";
-        } else if (slave_partition->State() == ReplState::kDBNoConnect) {
-          out_of_sync << "kDBNoConnect)";
-        } else {
-          out_of_sync << "Other)";
-        }
-      }
-    }
-  }
-
-  tmp_stream << "# Replication(";
-  switch (host_role) {
-    case PIKA_ROLE_SINGLE :
-    case PIKA_ROLE_MASTER : tmp_stream << "MASTER)\r\nrole:master\r\n"; break;
-    case PIKA_ROLE_SLAVE : tmp_stream << "SLAVE)\r\nrole:slave\r\n"; break;
-    case PIKA_ROLE_MASTER | PIKA_ROLE_SLAVE : tmp_stream << "Master && SLAVE)\r\nrole:master&&slave\r\n"; break;
-    default: info.append("ERR: server role is error\r\n"); return;
-  }
-
-  std::string slaves_list_str;
-  switch (host_role) {
-    case PIKA_ROLE_SLAVE :
-      tmp_stream << "master_host:" << g_pika_server->master_ip() << "\r\n";
-      tmp_stream << "master_port:" << g_pika_server->master_port() << "\r\n";
-      tmp_stream << "master_link_status:" << (((g_pika_server->repl_state() == PIKA_REPL_META_SYNC_DONE)
-              && all_partition_sync) ? "up" : "down") << "\r\n";
-      tmp_stream << "slave_priority:" << g_pika_conf->slave_priority() << "\r\n";
-      tmp_stream << "slave_read_only:" << g_pika_conf->slave_read_only() << "\r\n";
-      if (!all_partition_sync) {
-        tmp_stream <<"db_repl_state:" << out_of_sync.str() << "\r\n";
-      }
-      break;
-    case PIKA_ROLE_MASTER | PIKA_ROLE_SLAVE :
-      tmp_stream << "master_host:" << g_pika_server->master_ip() << "\r\n";
-      tmp_stream << "master_port:" << g_pika_server->master_port() << "\r\n";
-      tmp_stream << "master_link_status:" << (((g_pika_server->repl_state() == PIKA_REPL_META_SYNC_DONE)
-              && all_partition_sync) ? "up" : "down") << "\r\n";
-      tmp_stream << "slave_read_only:" << g_pika_conf->slave_read_only() << "\r\n";
-      if (!all_partition_sync) {
-        tmp_stream <<"db_repl_state:" << out_of_sync.str() << "\r\n";
-      }
-    case PIKA_ROLE_SINGLE :
-    case PIKA_ROLE_MASTER :
-      tmp_stream << "connected_slaves:" << g_pika_server->GetSlaveListString(slaves_list_str) << "\r\n" << slaves_list_str;
-  }
-
-
-  Status s;
-  uint32_t filenum = 0;
-  uint64_t offset = 0;
-  std::string safety_purge;
-  std::shared_ptr<SyncMasterPartition> master_partition = nullptr;
-  for (const auto& t_item : g_pika_server->tables_) {
-    slash::RWLock partition_rwl(&t_item.second->partitions_rw_, false);
-    for (const auto& p_item : t_item.second->partitions_) {
-      std::string table_name = p_item.second->GetTableName();
-      uint32_t partition_id = p_item.second->GetPartitionId();
-      master_partition = g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name, partition_id));
-      if (!master_partition) {
-        LOG(WARNING) << "Sync Master Partition: " << table_name << ":" << partition_id
-          << ", NotFound";
-        continue;
-      }
-      master_partition->Logger()->GetProducerStatus(&filenum, &offset);
-      tmp_stream << table_name << " binlog_offset=" << filenum << " " << offset;
-      s = master_partition->GetSafetyPurgeBinlog(&safety_purge);
-      tmp_stream << ",safety_purge=" << (s.ok() ? safety_purge : "error") << "\r\n";
-      if (g_pika_conf->consensus_level()) {
-        LogOffset last_log = master_partition->ConsensusLastIndex();
-        tmp_stream << table_name << " consensus last_log=" << last_log.ToString() << "\r\n";
-      }
-    }
-  }
-
-  info.append(tmp_stream.str());
+  g_pika_server->InfoReplication(info);
 }
 
 void InfoCmd::InfoKeyspace(std::string& info) {
@@ -1105,7 +926,7 @@ void InfoCmd::InfoDebug(std::string& info) {
   std::stringstream tmp_stream;
   tmp_stream << "# Synchronization Status" << "\r\n";
   info.append(tmp_stream.str());
-  g_pika_rm->RmStatus(&info);
+  g_pika_server->ReplicationStatus(info);
 
   tmp_stream.str(std::string());
   tmp_stream << "# Running Status " << "\r\n";
@@ -1553,17 +1374,6 @@ void ConfigCmd::ConfigGet(std::string &ret) {
     EncodeInt32(&config_body, g_pika_conf->max_conn_rbuf_size());
   }
 
-  if (slash::stringmatch(pattern.data(), "replication-num", 1)) {
-    elements += 2;
-    EncodeString(&config_body, "replication-num");
-    EncodeInt32(&config_body, g_pika_conf->replication_num());
-  }
-  if (slash::stringmatch(pattern.data(), "consensus-level", 1)) {
-    elements += 2;
-    EncodeString(&config_body, "consensus-level");
-    EncodeInt32(&config_body, g_pika_conf->consensus_level());
-  }
-
   std::stringstream resp;
   resp << "*" << std::to_string(elements) << "\r\n" << config_body;
   ret = resp.str();
@@ -1725,8 +1535,7 @@ void ConfigCmd::ConfigSet(std::string& ret) {
     g_pika_conf->SetMaxClientResponseSize(ival);
     ret = "+OK\r\n";
   } else if (set_item == "write-binlog") {
-    int role = g_pika_server->role();
-    if (role == PIKA_ROLE_SLAVE) {
+    if (g_pika_server->IsSlave()) {
       ret = "-ERR need to close master-slave mode first\r\n";
       return;
     } else if (value != "yes" && value != "no") {
@@ -1812,7 +1621,7 @@ void ConfigCmd::ConfigSet(std::string& ret) {
       ret = "-ERR Invalid argument \'" + value + "\' for CONFIG SET 'sync-window-size'\r\n";
       return;
     }
-    if (ival <= 0 || ival > kBinlogReadWinMaxSize) {
+    if (ival <= 0 || ival > PikaConf::kBinlogReadWinMaxSize) {
       ret = "-ERR Argument exceed range \'" + value + "\' for CONFIG SET 'sync-window-size'\r\n";
       return;
     }
@@ -2126,15 +1935,38 @@ void PaddingCmd::Do(std::shared_ptr<Partition> partition) {
   res_.SetRes(CmdRes::kOk);
 }
 
-std::string PaddingCmd::ToBinlog(
-        uint32_t exec_time,
-        uint32_t term_id,
-        uint64_t logic_id,
-        uint32_t filenum,
-        uint64_t offset) {
-  return PikaBinlogTransverter::ConstructPaddingBinlog(
-          BinlogType::TypeFirst, argv_[1].size() + BINLOG_ITEM_HEADER_SIZE
-          + PADDING_BINLOG_PROTOCOL_SIZE + SPACE_STROE_PARAMETER_LENGTH);
+std::string PaddingCmd::ToBinlogContent() {
+  uint32_t size = argv_[1].size()
+                  + BINLOG_ITEM_HEADER_SIZE
+                  + kPaddingProtocalSize
+                  + kSpaceStoreParamterSize;
+  assert(size <= kBlockSize - kHeaderSize);
+  int32_t content_len = size - BINLOG_ITEM_HEADER_SIZE;
+  int32_t parameter_len = content_len - kPaddingProtocalSize
+                          - kSpaceStoreParamterSize;
+  if (parameter_len < 0) {
+    return std::string();
+  }
+  std::string content;
+  RedisAppendLen(content, 2, "*");
+  RedisAppendLen(content, 7, "$");
+  RedisAppendContent(content, "padding");
+
+  std::string parameter_len_str;
+  std::ostringstream os;
+  os << parameter_len;
+  std::istringstream is(os.str());
+  is >> parameter_len_str;
+  if (parameter_len_str.size() > kSpaceStoreParamterSize) {
+    return std::string();
+  }
+
+  content.append("$");
+  content.append(kSpaceStoreParamterSize- parameter_len_str.size(), '0');
+  content.append(parameter_len_str);
+  content.append(kNewLine);
+  RedisAppendContent(content, std::string(parameter_len, '*'));
+  return std::move(content);
 }
 
 #ifdef TCMALLOC_EXTENSION

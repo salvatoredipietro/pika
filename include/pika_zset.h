@@ -24,8 +24,6 @@ class ZAddCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZAddCmd(*this);
   }
@@ -45,8 +43,6 @@ class ZCardCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZCardCmd(*this);
   }
@@ -65,8 +61,6 @@ class ZScanCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZScanCmd(*this);
   }
@@ -90,8 +84,6 @@ class ZIncrbyCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZIncrbyCmd(*this);
   }
@@ -125,8 +117,6 @@ class ZRangeCmd : public ZsetRangeParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRangeCmd(*this);
   }
@@ -144,8 +134,6 @@ class ZRevrangeCmd : public ZsetRangeParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRevrangeCmd(*this);
   }
@@ -181,8 +169,6 @@ class ZRangebyscoreCmd : public ZsetRangebyscoreParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRangebyscoreCmd(*this);
   }
@@ -200,8 +186,6 @@ class ZRevrangebyscoreCmd : public ZsetRangebyscoreParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRevrangebyscoreCmd(*this);
   }
@@ -219,8 +203,6 @@ class ZCountCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZCountCmd(*this);
   }
@@ -245,8 +227,6 @@ class ZRemCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRemCmd(*this);
   }
@@ -277,8 +257,6 @@ class ZUnionstoreCmd : public ZsetUIstoreParentCmd {
   ZUnionstoreCmd(const std::string& name, int arity, uint16_t flag)
       : ZsetUIstoreParentCmd(name, arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZUnionstoreCmd(*this);
   }
@@ -291,8 +269,6 @@ class ZInterstoreCmd : public ZsetUIstoreParentCmd {
   ZInterstoreCmd(const std::string& name, int arity, uint16_t flag)
       : ZsetUIstoreParentCmd(name, arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZInterstoreCmd(*this);
   }
@@ -319,8 +295,6 @@ class ZRankCmd : public ZsetRankParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRankCmd(*this);
   }
@@ -338,8 +312,6 @@ class ZRevrankCmd : public ZsetRankParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRevrankCmd(*this);
   }
@@ -357,8 +329,6 @@ class ZScoreCmd : public ZsetRankParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZScoreCmd(*this);
   }
@@ -394,8 +364,6 @@ class ZRangebylexCmd : public ZsetRangebylexParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRangebylexCmd(*this);
   }
@@ -413,8 +381,6 @@ class ZRevrangebylexCmd : public ZsetRangebylexParentCmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRevrangebylexCmd(*this);
   }
@@ -432,8 +398,6 @@ class ZLexcountCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZLexcountCmd(*this);
   }
@@ -456,8 +420,6 @@ class ZRemrangebyrankCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRemrangebyrankCmd(*this);
   }
@@ -477,8 +439,6 @@ class ZRemrangebyscoreCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRemrangebyscoreCmd(*this);
   }
@@ -502,8 +462,6 @@ class ZRemrangebylexCmd : public Cmd {
     return res;
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZRemrangebylexCmd(*this);
   }
@@ -527,8 +485,6 @@ class ZPopmaxCmd : public Cmd {
     return res; 
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZPopmaxCmd(*this);
   }
@@ -548,8 +504,6 @@ class ZPopminCmd : public Cmd {
     return res; 
   }
   virtual void Do(std::shared_ptr<Partition> partition = nullptr);
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new ZPopminCmd(*this);
   }

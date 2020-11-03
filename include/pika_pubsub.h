@@ -16,8 +16,6 @@ class PublishCmd : public Cmd {
   PublishCmd(const std::string& name, int arity, uint16_t flag)
      : Cmd(name,  arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new PublishCmd(*this);
   }
@@ -32,8 +30,6 @@ class SubscribeCmd : public Cmd {
   SubscribeCmd(const std::string& name, int arity, uint16_t flag)
      : Cmd(name,  arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new SubscribeCmd(*this);
   }
@@ -46,8 +42,6 @@ class UnSubscribeCmd : public Cmd {
   UnSubscribeCmd(const std::string& name, int arity, uint16_t flag)
      : Cmd(name,  arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new UnSubscribeCmd(*this);
   }
@@ -60,8 +54,6 @@ class PUnSubscribeCmd : public Cmd {
   PUnSubscribeCmd(const std::string& name, int arity, uint16_t flag)
      : Cmd(name,  arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new PUnSubscribeCmd(*this);
   }
@@ -74,8 +66,6 @@ class PSubscribeCmd : public Cmd {
   PSubscribeCmd(const std::string& name, int arity, uint16_t flag)
      : Cmd(name,  arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new PSubscribeCmd(*this);
   }
@@ -88,8 +78,6 @@ class PubSubCmd : public Cmd {
   PubSubCmd(const std::string& name, int arity, uint16_t flag)
      : Cmd(name,  arity, flag) {}
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) override;
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) {};
-  virtual void Merge() {};
   virtual Cmd* Clone() override {
     return new PubSubCmd(*this);
   }
