@@ -5,17 +5,10 @@
 
 #include "include/pika_conf.h"
 
-#include <glog/logging.h>
-
 #include <algorithm>
-#include <strings.h>
-
-#include "slash/include/env.h"
-
-#include "include/pika_define.h"
 
 PikaConf::PikaConf(const std::string& path)
-    : slash::BaseConf(path), conf_path_(path) {
+  : slash::BaseConf(path), conf_path_(path) {
   pthread_rwlock_init(&rwlock_, NULL);
   local_meta_ = new PikaMeta();
 }
@@ -142,13 +135,11 @@ Status PikaConf::DelTableSanityCheck(const std::string &table_name) {
   return InternalGetTargetTable(table_name, &table_index);
 }
 
-int PikaConf::Load()
-{
+int PikaConf::Load() {
   int ret = LoadConf();
   if (ret != 0) {
     return ret;
   }
-
   GetConfInt("timeout", &timeout_);
   if (timeout_ < 0) {
       timeout_ = 60; // 60s
@@ -200,19 +191,7 @@ int PikaConf::Load()
       expire_dump_days_ = 0;
   }
   GetConfStr("dump-prefix", &bgsave_prefix_);
-
-  GetConfInt("expire-logs-nums", &expire_logs_nums_);
-  if (expire_logs_nums_ <= 10 ) {
-      expire_logs_nums_ = 10;
-  }
-  GetConfInt("expire-logs-days", &expire_logs_days_);
-  if (expire_logs_days_ <= 0 ) {
-      expire_logs_days_ = 1;
-  }
   GetConfStr("compression", &compression_);
-  // set slave read only true as default
-  slave_read_only_ = true;
-  GetConfInt("slave-priority", &slave_priority_);
 
   //
   // Immutable Sections
@@ -243,13 +222,6 @@ int PikaConf::Load()
   }
   if (thread_pool_size_ > 100) {
     thread_pool_size_ = 100;
-  }
-  GetConfInt("sync-thread-num", &sync_thread_num_);
-  if (sync_thread_num_ <= 0) {
-    sync_thread_num_ = 3;
-  }
-  if (sync_thread_num_ > 24) {
-    sync_thread_num_ = 24;
   }
 
   std::string instance_mode;
@@ -283,30 +255,6 @@ int PikaConf::Load()
     }
   }
   default_table_ = table_structs_[0].table_name;
-
-  int tmp_replication_num = 0;
-  GetConfInt("replication-num", &tmp_replication_num);
-  if (tmp_replication_num > 4 || tmp_replication_num < 0) {
-    LOG(FATAL) << "replication-num " << tmp_replication_num <<
-      "is invalid, please pick from [0...4]";
-  }
-  replication_num_.store(tmp_replication_num);
-
-  int tmp_consensus_level = 0;
-  GetConfInt("consensus-level", &tmp_consensus_level);
-  if (tmp_consensus_level < 0 ||
-      tmp_consensus_level > replication_num_.load()) {
-    LOG(FATAL) << "consensus-level " << tmp_consensus_level
-      << " is invalid, current replication-num: " << replication_num_.load()
-      << ", please pick from 0 to replication-num"
-      << " [0..." << replication_num_.load() << "]";
-  }
-  consensus_level_.store(tmp_consensus_level);
-  if (classic_mode_.load() &&
-      (consensus_level_.load() != 0 || replication_num_.load() != 0)) {
-    LOG(FATAL) << "consensus-level & replication-num only configurable under sharding mode,"
-      << " set it to be 0 if you are using classic mode";
-  }
 
   compact_cron_ = "";
   GetConfStr("compact-cron", &compact_cron_);
@@ -469,15 +417,6 @@ int PikaConf::Load()
   GetConfStr("daemonize", &dmz);
   daemonize_ =  (dmz == "yes") ? true : false;
 
-  // binlog
-  std::string wb;
-  GetConfStr("write-binlog", &wb);
-  write_binlog_ = (wb == "no") ? false : true;
-  GetConfInt("binlog-file-size", &binlog_file_size_);
-  if (binlog_file_size_ < 1024
-    || static_cast<int64_t>(binlog_file_size_) > (1024LL * 1024 * 1024)) {
-    binlog_file_size_ = 100 * 1024 * 1024;    // 100M
-  }
   GetConfStr("pidfile", &pidfile_);
 
   // db sync
@@ -494,10 +433,95 @@ int PikaConf::Load()
   network_interface_ = "";
   GetConfStr("network-interface", &network_interface_);
 
+  // max conn rbuf size
+  int tmp_max_conn_rbuf_size = PIKA_MAX_CONN_RBUF;
+  GetConfInt("max-conn-rbuf-size", &tmp_max_conn_rbuf_size);
+  if (tmp_max_conn_rbuf_size == PIKA_MAX_CONN_RBUF_LB
+      || tmp_max_conn_rbuf_size == PIKA_MAX_CONN_RBUF_HB) {
+    max_conn_rbuf_size_.store(tmp_max_conn_rbuf_size);
+  } else {
+    max_conn_rbuf_size_.store(PIKA_MAX_CONN_RBUF);
+  }
+
+  // binlog
+  std::string wb;
+  GetConfStr("write-binlog", &wb);
+  write_binlog_ = (wb == "no") ? false : true;
+  GetConfInt("binlog-file-size", &binlog_file_size_);
+  if (binlog_file_size_ < 1024
+    || static_cast<int64_t>(binlog_file_size_) > (1024LL * 1024 * 1024)) {
+    binlog_file_size_ = 100 * 1024 * 1024;    // 100M
+  }
+  GetConfInt("expire-logs-nums", &expire_logs_nums_);
+  if (expire_logs_nums_ <= 10 ) {
+      expire_logs_nums_ = 10;
+  }
+  GetConfInt("expire-logs-days", &expire_logs_days_);
+  if (expire_logs_days_ <= 0 ) {
+      expire_logs_days_ = 1;
+  }
+  // set slave read only true as default
+  slave_read_only_ = true;
+  GetConfInt("slave-priority", &slave_priority_);
+  //
+  // Immutable Sections
+  //
+  GetConfInt("sync-thread-num", &sync_thread_num_);
+  if (sync_thread_num_ <= 0) {
+    sync_thread_num_ = 3;
+  }
+  if (sync_thread_num_ > 24) {
+    sync_thread_num_ = 24;
+  }
+
+  std::string replication_protocol;
+  GetConfStr("replication-communication-protocol", &replication_protocol);
+  if (strcasecmp(replication_protocol.data(), "classic") == 0) {
+    replication_protocol_type_ = ReplicationProtocolType::kClassicProtocol;
+  } else if (strcasecmp(replication_protocol.data(), "cluster") == 0) {
+    replication_protocol_type_ = ReplicationProtocolType::kClusterProtocol;
+  } else {
+    LOG(FATAL) << "replication-communication-protocol " << replication_protocol << " is invalid"
+               << ", should be one of [classic | cluster]";
+  }
+
+  if (classic_mode_.load()
+      && replication_protocol_type_ == ReplicationProtocolType::kClusterProtocol) {
+    LOG(FATAL) << "when we in classic mode, the replication-communication-protocol must be 'classic'"; 
+  }
+
+  check_quorum_ = false;
+  GetConfBool("check-vote", &check_quorum_);
+
+  pre_vote_ = false;
+  GetConfBool("pre-vote", &pre_vote_);
+
+  int64_t election_timeout_ms;
+  GetConfInt64("election-timeout-ms", &election_timeout_ms);
+  if (election_timeout_ms <= 0) {
+    election_timeout_ms = 10000/*10s*/;
+  }
+  election_timeout_ms_ = static_cast<uint64_t>(election_timeout_ms);
+
+  int64_t heartbeat_timeout_ms;
+  GetConfInt64("heartbeat-timeout-ms", &heartbeat_timeout_ms);
+  if (heartbeat_timeout_ms <= 0) {
+    heartbeat_timeout_ms = 1000/*1s*/;
+  }
+  heartbeat_timeout_ms_ = static_cast<uint64_t>(heartbeat_timeout_ms);
+
+  if (election_timeout_ms_ > kMaxElectionTimeoutMS) {
+    LOG(FATAL) << "election-timeout-ms " << election_timeout_ms_
+               << " is invalid, must be less than " << kMaxElectionTimeoutMS;
+  }
+  if (election_timeout_ms_ < 5 * heartbeat_timeout_ms_) {
+    LOG(FATAL) << "election-timeout-ms " << election_timeout_ms_ << " is invalid"
+               << ", should be at least five times the heartbeat interval " << heartbeat_timeout_ms_;
+  }
+
   // slaveof
   slaveof_ = "";
   GetConfStr("slaveof", &slaveof_);
-
   // sync window size
   int tmp_sync_window_size = kBinlogReadWinDefaultSize;
   GetConfInt("sync-window-size", &tmp_sync_window_size);
@@ -507,16 +531,6 @@ int PikaConf::Load()
     sync_window_size_.store(kBinlogReadWinMaxSize);
   } else {
     sync_window_size_.store(tmp_sync_window_size);
-  }
-
-  // max conn rbuf size
-  int tmp_max_conn_rbuf_size = PIKA_MAX_CONN_RBUF;
-  GetConfInt("max-conn-rbuf-size", &tmp_max_conn_rbuf_size);
-  if (tmp_max_conn_rbuf_size == PIKA_MAX_CONN_RBUF_LB
-      || tmp_max_conn_rbuf_size == PIKA_MAX_CONN_RBUF_HB) {
-    max_conn_rbuf_size_.store(tmp_max_conn_rbuf_size);
-  } else {
-    max_conn_rbuf_size_.store(PIKA_MAX_CONN_RBUF);
   }
 
   return ret;
@@ -541,29 +555,29 @@ int PikaConf::ConfigRewrite() {
   SetConfStr("dump-prefix", bgsave_prefix_);
   SetConfInt("maxclients", maxclients_);
   SetConfInt("dump-expire", expire_dump_days_);
-  SetConfInt("expire-logs-days", expire_logs_days_);
-  SetConfInt("expire-logs-nums", expire_logs_nums_);
   SetConfInt("root-connection-num", root_connection_num_);
   SetConfStr("slowlog-write-errorlog", slowlog_write_errorlog_.load() ? "yes" : "no");
   SetConfInt("slowlog-log-slower-than", slowlog_log_slower_than_.load());
   SetConfInt("slowlog-max-len", slowlog_max_len_);
-  SetConfStr("write-binlog", write_binlog_ ? "yes" : "no");
   SetConfInt("max-cache-statistic-keys", max_cache_statistic_keys_);
   SetConfInt("small-compaction-threshold", small_compaction_threshold_);
   SetConfInt("max-client-response-size", max_client_response_size_);
   SetConfInt("db-sync-speed", db_sync_speed_);
   SetConfStr("compact-cron", compact_cron_);
   SetConfStr("compact-interval", compact_interval_);
-  SetConfInt("slave-priority", slave_priority_);
-  SetConfInt("sync-window-size", sync_window_size_.load());
-  SetConfInt("consensus-level", consensus_level_.load());
-  SetConfInt("replication-num", replication_num_.load());
   // options for storage engine
   SetConfInt("max-cache-files", max_cache_files_);
   SetConfInt("max-background-compactions", max_background_compactions_);
   SetConfInt("max-write-buffer-number", max_write_buffer_num_);
   SetConfInt64("write-buffer-size", write_buffer_size_);
   SetConfInt64("arena-block-size", arena_block_size_);
+
+  // options for replication
+  SetConfStr("write-binlog", write_binlog_ ? "yes" : "no");
+  SetConfInt("expire-logs-days", expire_logs_days_);
+  SetConfInt("expire-logs-nums", expire_logs_nums_);
+  SetConfInt("slave-priority", slave_priority_);
+  SetConfInt("sync-window-size", sync_window_size_.load());
   // slaveof config item is special
   SetConfStr("slaveof", slaveof_);
 

@@ -6,16 +6,16 @@
 #include "include/pika_partition.h"
 
 #include <fstream>
-
-#include "include/pika_conf.h"
-#include "include/pika_server.h"
-#include "include/pika_rm.h"
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+#include <google/protobuf/io//coded_stream.h>
 
 #include "slash/include/mutex_impl.h"
 
+#include "include/pika_server.h"
+#include "include/pika_conf.h"
+
 extern PikaConf* g_pika_conf;
 extern PikaServer* g_pika_server;
-extern PikaReplicaManager* g_pika_rm;
 
 std::string PartitionPath(const std::string& table_path,
                           uint32_t partition_id) {
@@ -55,11 +55,14 @@ std::string DbSyncPath(const std::string& sync_path,
 
 Partition::Partition(const std::string& table_name,
                      uint32_t partition_id,
-                     const std::string& table_db_path) :
+                     const std::string& table_db_path,
+                     const std::shared_ptr<blackwidow::BlackWidow>& state_db) :
   table_name_(table_name),
   partition_id_(partition_id),
+  meta_storage_(nullptr),
+  repl_status_(Status::OK()),
+  leader_id_(PeerID()),
   bgsave_engine_(NULL) {
-
   db_path_ = g_pika_conf->classic_mode() ?
       table_db_path : PartitionPath(table_db_path, partition_id_);
   bgsave_sub_path_ = g_pika_conf->classic_mode() ?
@@ -69,11 +72,19 @@ Partition::Partition(const std::string& table_name,
   partition_name_ = g_pika_conf->classic_mode() ?
       table_name : PartitionName(table_name_, partition_id_);
 
+  if (g_pika_conf->classic_mode()
+      || g_pika_conf->replication_protocol_type() == ReplicationProtocolType::kClassicProtocol) {
+    meta_storage_ = new MemoryBasedMetaStorage();
+  } else {
+    meta_storage_ = new DBBasedClusterMetaStorage(state_db, partition_name_);
+  }
+
   pthread_rwlockattr_t attr;
   pthread_rwlockattr_init(&attr);
   pthread_rwlockattr_setkind_np(&attr,
           PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
 
+  pthread_rwlock_init(&rg_state_rwlock_, &attr);
   pthread_rwlock_init(&db_rwlock_, &attr);
 
   db_ = std::shared_ptr<blackwidow::BlackWidow>(new blackwidow::BlackWidow());
@@ -84,6 +95,9 @@ Partition::Partition(const std::string& table_name,
   opened_ = s.ok() ? true : false;
   assert(db_);
   assert(s.ok());
+
+  Start();
+
   LOG(INFO) << partition_name_ << " DB Success";
 }
 
@@ -91,7 +105,37 @@ Partition::~Partition() {
   Close();
   delete bgsave_engine_;
   pthread_rwlock_destroy(&db_rwlock_);
+  pthread_rwlock_destroy(&rg_state_rwlock_);
   delete lock_mgr_;
+}
+
+int Partition::Start() {
+  // Create and start the underlying replication group.
+  ReplicationGroupID group_id(table_name_, partition_id_);
+  replication::RGNodeInitializeConfig init_config;
+  init_config.meta_storage = meta_storage_;
+  replication::GroupIDAndInitConfMap id_init_conf_map{{group_id, init_config}};
+  Status s = g_pika_server->CreateReplicationGroupNodes(id_init_conf_map);
+  if (!s.ok()) {
+    LOG(FATAL) << partition_name_ << " create the underlying replication group failed: " << s.ToString();
+  }
+  s = g_pika_server->StartReplicationGroupNode(group_id);
+  if (!s.ok()) {
+    LOG(FATAL) << partition_name_ << " start the underlying replication group failed: " << s.ToString();
+  }
+  DLOG(INFO) << "Replication group: " << group_id.ToString() << " started!";
+  return 0;
+}
+
+int Partition::Stop() {
+  // Stop the underlying replication group.
+  ReplicationGroupID group_id(table_name_, partition_id_);
+  Status s = g_pika_server->StopReplicationGroupNode(group_id);
+  if (!s.ok()) {
+    LOG(ERROR) << partition_name_ << " stop the underlying replication group failed: " << s.ToString();
+    return -1;
+  }
+  return 0;
 }
 
 void Partition::Leave() {
@@ -100,6 +144,11 @@ void Partition::Leave() {
 }
 
 void Partition::Close() {
+  Stop();
+  if (meta_storage_ != nullptr) {
+    delete meta_storage_;
+    meta_storage_ = nullptr;
+  }
   if (!opened_) {
     return;
   }
@@ -166,13 +215,22 @@ slash::lock::LockMgr* Partition::LockMgr() {
   return lock_mgr_;
 }
 
-void Partition::PrepareRsync() {
-  slash::DeleteDirIfExist(dbsync_path_);
-  slash::CreatePath(dbsync_path_ + "strings");
-  slash::CreatePath(dbsync_path_ + "hashes");
-  slash::CreatePath(dbsync_path_ + "lists");
-  slash::CreatePath(dbsync_path_ + "sets");
-  slash::CreatePath(dbsync_path_ + "zsets");
+Status Partition::PrepareRsync() {
+  if (!slash::DeleteDirIfExist(dbsync_path_)) {
+    LOG(WARNING) << "Partition: " << partition_name_
+                 << ", fail to delete dbsync_path " << dbsync_path_;
+    return Status::Corruption("delete dbsync_path");
+  }
+  if (0 != slash::CreatePath(dbsync_path_ + "strings")
+      || 0 != slash::CreatePath(dbsync_path_ + "hashes")
+      || 0 != slash::CreatePath(dbsync_path_ + "lists")
+      || 0 != slash::CreatePath(dbsync_path_ + "sets")
+      || 0 != slash::CreatePath(dbsync_path_ + "zsets")) {
+    LOG(WARNING) << "Partition: " << partition_name_
+                 << ", fail to create dbsync_path " << dbsync_path_;
+    return Status::Corruption("create dbsync_path");
+  }
+  return Status::OK();
 }
 
 // Try to update master offset
@@ -181,27 +239,18 @@ void Partition::PrepareRsync() {
 // 1, Check dbsync finished, got the new binlog offset
 // 2, Replace the old db
 // 3, Update master offset, and the PikaAuxiliaryThread cron will connect and do slaveof task with master
-bool Partition::TryUpdateMasterOffset() {
+Status Partition::TryUpdateMasterOffset(const std::shared_ptr<ReplicationGroupNode>& node,
+                                        LogOffset* log_offset) {
   std::string info_path = dbsync_path_ + kBgsaveInfoFile;
   if (!slash::FileExists(info_path)) {
-    return false;
+    return Status::Incomplete("db info file " + info_path + " does not exist");
   }
-
-  std::shared_ptr<SyncSlavePartition> slave_partition =
-    g_pika_rm->GetSyncSlavePartitionByName(
-        PartitionInfo(table_name_, partition_id_));
-  if (!slave_partition) {
-    LOG(WARNING) << "Slave Partition: " << partition_name_ << " not exist";
-    return false;
-  }
-
   // Got new binlog offset
   std::ifstream is(info_path);
   if (!is) {
     LOG(WARNING) << "Partition: " << partition_name_
-        << ", Failed to open info file after db sync";
-    slave_partition->SetReplState(ReplState::kError);
-    return false;
+                 << ", Failed to open info file after db sync";
+    return Status::Corruption("failed to open info file");
   }
   std::string line, master_ip;
   int lineno = 0;
@@ -213,66 +262,55 @@ bool Partition::TryUpdateMasterOffset() {
     } else if (lineno > 2 && lineno < 8) {
       if (!slash::string2l(line.data(), line.size(), &tmp) || tmp < 0) {
         LOG(WARNING) << "Partition: " << partition_name_
-            << ", Format of info file after db sync error, line : " << line;
+                     << ", Format of info file after db sync error, line : " << line;
         is.close();
-        slave_partition->SetReplState(ReplState::kError);
-        return false;
+        return Status::Corruption("format of info file error");
       }
-      if (lineno == 3) { master_port = tmp; }
-      else if (lineno == 4) { filenum = tmp; }
-      else if (lineno == 5) { offset = tmp; }
-      else if (lineno == 6) { term = tmp; }
-      else if (lineno == 7) { index = tmp; }
+      if (lineno == 3) {
+        master_port = tmp;
+      } else if (lineno == 4) {
+        filenum = tmp;
+      } else if (lineno == 5) {
+        offset = tmp;
+      } else if (lineno == 6) {
+        term = tmp;
+      } else if (lineno == 7) {
+        index = tmp;
+      }
     } else if (lineno > 8) {
       LOG(WARNING) << "Partition: " << partition_name_
-          << ", Format of info file after db sync error, line : " << line;
+                   << ", Format of info file after db sync error, line : " << line;
       is.close();
-      slave_partition->SetReplState(ReplState::kError);
-      return false;
+      return Status::Corruption("format of info file error");
     }
   }
   is.close();
+  LOG(INFO) << "Partition: " << partition_name_
+            << " Information from dbsync info"
+            << ", master_ip: " << master_ip
+            << ", master_port: " << master_port
+            << ", filenum: " << filenum
+            << ", offset: " << offset
+            << ", term: " << term
+            << ", index: " << index;
 
-  LOG(INFO) << "Partition: " << partition_name_ << " Information from dbsync info"
-      << ",  master_ip: " << master_ip
-      << ", master_port: " << master_port
-      << ", filenum: " << filenum
-      << ", offset: " << offset
-      << ", term: " << term
-      << ", index: " << index;
-
+  PeerID peer_id(master_ip, master_port);
+  auto v_state = node->NodeVolatileState();
   // Sanity check
-  if (master_ip != slave_partition->MasterIp()
-    || master_port != slave_partition->MasterPort()) {
+  if (peer_id != v_state.leader_id) {
     LOG(WARNING) << "Partition: " << partition_name_
-      << " Error master node ip port: " << master_ip << ":" << master_port;
-    slave_partition->SetReplState(ReplState::kError);
-    return false;
+                 << ", error master node ip port: " << peer_id.ToString()
+                 << ", expect ip port: " << v_state.leader_id.ToString();
+    return Status::Corruption("unexpected master node");
   }
-
   slash::DeleteFile(info_path);
   if (!ChangeDb(dbsync_path_)) {
     LOG(WARNING) << "Partition: " << partition_name_
-        << ", Failed to change db";
-    slave_partition->SetReplState(ReplState::kError);
-    return false;
+                 << ", Failed to change db";
+    return Status::Corruption("failed to change db");
   }
-
-  // Update master offset
-  std::shared_ptr<SyncMasterPartition> master_partition =
-    g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name_, partition_id_));
-  if (!master_partition) {
-    LOG(WARNING) << "Master Partition: " << partition_name_ << " not exist";
-    return false;
-  }
-  if (g_pika_conf->consensus_level() != 0) {
-    master_partition->ConsensusReset(
-        LogOffset(BinlogOffset(filenum, offset), LogicOffset(term, index)));
-  } else {
-    master_partition->Logger()->SetProducerStatus(filenum, offset);
-  }
-  slave_partition->SetReplState(ReplState::kTryConnect);
-  return true;
+  *log_offset = LogOffset(BinlogOffset(filenum, offset), LogicOffset(term, index));
+  return Status::OK();
 }
 
 /*
@@ -281,7 +319,6 @@ bool Partition::TryUpdateMasterOffset() {
  * db remain the old one if return false
  */
 bool Partition::ChangeDb(const std::string& new_path) {
-
   std::string tmp_path(db_path_);
   if (tmp_path.back() == '/') {
     tmp_path.resize(tmp_path.size() - 1);
@@ -348,11 +385,11 @@ void Partition::DoBgSave(void* arg) {
   out.open(info.path + "/" + kBgsaveInfoFile, std::ios::in | std::ios::trunc);
   if (out.is_open()) {
     out << (time(NULL) - info.start_time) << "s\n"
-      << g_pika_server->host() << "\n"
-      << g_pika_server->port() << "\n"
-      << info.offset.b_offset.filenum << "\n"
-      << info.offset.b_offset.offset << "\n";
-    if (g_pika_conf->consensus_level() != 0) {
+        << g_pika_server->host() << "\n"
+        << g_pika_server->port() << "\n"
+        << info.offset.b_offset.filenum << "\n"
+        << info.offset.b_offset.offset << "\n";
+    if (g_pika_conf->replication_protocol_type() == ReplicationProtocolType::kClusterProtocol) {
       out << info.offset.l_offset.term << "\n"
           << info.offset.l_offset.index << "\n";
     }
@@ -377,8 +414,8 @@ bool Partition::RunBgsaveEngine() {
 
   BgSaveInfo info = bgsave_info();
   LOG(INFO) << partition_name_ << " bgsave_info: path=" << info.path
-    << ",  filenum=" << info.offset.b_offset.filenum
-    << ", offset=" << info.offset.b_offset.offset;
+            << ",  filenum=" << info.offset.b_offset.filenum
+            << ", offset=" << info.offset.b_offset.offset;
 
   // Backup to tmp dir
   rocksdb::Status s = bgsave_engine_->CreateNewBackup(info.path);
@@ -423,24 +460,17 @@ bool Partition::InitBgsaveEngine() {
     return false;
   }
 
-  std::shared_ptr<SyncMasterPartition> partition = g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name_, partition_id_));
-  if (!partition) {
+  std::shared_ptr<ReplicationGroupNode> node = g_pika_server->GetReplicationGroupNode(table_name_, partition_id_);
+  if (!node) {
     LOG(WARNING) << partition_name_ << " not found";
     return false;
   }
 
   {
     RWLock l(&db_rwlock_, true);
-    LogOffset bgsave_offset;
-    if (g_pika_conf->consensus_level() != 0) {
-      bgsave_offset = partition->ConsensusAppliedIndex();
-    } else {
-      // term, index are 0
-      partition->Logger()->GetProducerStatus(&(bgsave_offset.b_offset.filenum), &(bgsave_offset.b_offset.offset));
-    }
     {
       slash::MutexLock l(&bgsave_protector_);
-      bgsave_info_.offset = bgsave_offset;
+      meta_storage_->MetaSnapshot(&bgsave_info_.offset, &bgsave_info_.conf_state);
     }
     s = bgsave_engine_->SetBackupContent();
     if (!s.ok()) {
@@ -546,4 +576,365 @@ Status Partition::GetKeyNum(std::vector<blackwidow::KeyInfo>* key_info) {
   key_scan_info_.duration = time(NULL) - key_scan_info_.start_time;
   key_scan_info_.key_scaning_ = false;
   return Status::OK();
+}
+
+void Partition::set_repl_status(const Status& status) {
+  slash::RWLock l(&rg_state_rwlock_, true);
+  repl_status_ = status;
+}
+
+Status Partition::repl_status() {
+  slash::RWLock l(&rg_state_rwlock_, false);
+  return repl_status_;
+}
+
+void Partition::set_leader_id(const PeerID& leader_id) {
+  slash::RWLock l(&rg_state_rwlock_, true);
+  leader_id_ = leader_id;
+}
+
+PeerID Partition::leader_id() {
+  slash::RWLock l(&rg_state_rwlock_, false);
+  return leader_id_;
+}
+
+
+Status Partition::ApplyNormalEntry(const LogOffset& offset) {
+  return meta_storage_->set_applied_offset(offset);
+}
+
+Status Partition::ApplyConfChange(const InnerMessage::ConfChange& change, const LogOffset& offset) {
+  using ChangeResult = replication::Configuration::ChangeResult;
+  ChangeResult change_result;
+  PeerID node_id(change.node_id().ip(), change.node_id().port());
+  Configuration conf;
+  Status s = meta_storage_->configuration(&conf);
+  if (!s.ok()) {
+    return s;
+  }
+  switch (change.type()) {
+    case InnerMessage::ConfChangeType::kAddVoter: {
+      change_result = conf.AddPeer(node_id, replication::PeerRole::kRoleVoter);
+      break;
+    }
+    case InnerMessage::ConfChangeType::kAddLearner: {
+      change_result = conf.AddPeer(node_id, replication::PeerRole::kRoleLearner);
+      break;
+    }
+    case InnerMessage::ConfChangeType::kRemoveNode: {
+      change_result = conf.RemovePeer(node_id);
+      break;
+    }
+    case InnerMessage::ConfChangeType::kPromoteLearner: {
+      change_result = conf.PromotePeer(node_id);
+      break;
+    }
+  }
+  if (!change_result.IsOK()) {
+    return Status::Corruption(change_result.ToString());
+  }
+  // persistent to storage
+  return meta_storage_->ApplyConfiguration(conf, offset);
+}
+
+MemoryBasedMetaStorage::MemoryBasedMetaStorage() {
+  pthread_rwlock_init(&rwlock_, NULL);
+}
+
+MemoryBasedMetaStorage::~MemoryBasedMetaStorage() {
+  pthread_rwlock_destroy(&rwlock_);
+}
+
+Status MemoryBasedMetaStorage::applied_offset(LogOffset* offset) {
+  slash::RWLock lk(&rwlock_, false);
+  *offset = applied_offset_;
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::set_applied_offset(const LogOffset& offset) {
+  slash::RWLock lk(&rwlock_, true);
+  if (offset.l_offset.index > applied_offset_.l_offset.index) {
+    applied_offset_ = offset;
+  }
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::snapshot_offset(LogOffset* offset) {
+  slash::RWLock lk(&rwlock_, false);
+  *offset = snapshot_offset_;
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::set_snapshot_offset(const LogOffset& offset) {
+  slash::RWLock lk(&rwlock_, true);
+  if (offset.l_offset.index > snapshot_offset_.l_offset.index) {
+    snapshot_offset_ = offset;
+  }
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::configuration(Configuration* conf) {
+  slash::RWLock lk(&rwlock_, false);
+  *conf = configuration_;
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::set_configuration(const Configuration& conf) {
+  slash::RWLock lk(&rwlock_, true);
+  configuration_ = conf;
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::MetaSnapshot(LogOffset* applied_offset, Configuration* conf) {
+  slash::RWLock lk(&rwlock_, false);
+  *applied_offset = applied_offset_;
+  *conf = configuration_;
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::ApplyConfiguration(const Configuration& conf, const LogOffset& offset) {
+  return Status::NotSupported("ApplyConfiguration");
+}
+
+Status MemoryBasedMetaStorage::ResetOffset(const LogOffset& snapshot_offset,
+                                           const LogOffset& applied_offset) {
+  slash::RWLock lk(&rwlock_, true);
+  snapshot_offset_ = snapshot_offset;
+  applied_offset_ = applied_offset;
+  return Status::OK();
+}
+
+Status MemoryBasedMetaStorage::ResetOffsetAndConfiguration(const LogOffset& snapshot_offset,
+                                                           const LogOffset& applied_offset,
+                                                           const Configuration& configuration) {
+  slash::RWLock lk(&rwlock_, true);
+  configuration_ = configuration;
+  snapshot_offset_ = snapshot_offset;
+  applied_offset_ = applied_offset;
+  return Status::OK();
+}
+
+DBBasedClusterMetaStorage::DBBasedClusterMetaStorage(const std::shared_ptr<blackwidow::BlackWidow>& db,
+                                                         const std::string& partition_name)
+  : partition_name_(partition_name),
+  db_(db) {
+  pthread_rwlock_init(&rwlock_, NULL);
+  Initialize();
+}
+
+DBBasedClusterMetaStorage::~DBBasedClusterMetaStorage() {
+  pthread_rwlock_unlock(&rwlock_);
+}
+
+void DBBasedClusterMetaStorage::Initialize() {
+  // Reload meta info from persistent storage.
+  // 1. Recover configuration
+  slash::RWLock lk(&rwlock_, true);
+  std::string key = MakeConfStateKey();
+  std::string value;
+  db_->Get(key, &value);
+  InnerMessage::ConfState conf_state;
+  ::google::protobuf::io::ArrayInputStream input(value.c_str(), value.size());
+  ::google::protobuf::io::CodedInputStream decoder(&input);
+  bool success = conf_state.ParseFromCodedStream(&decoder) && decoder.ConsumedEntireMessage();
+  if (!success) {
+    LOG(FATAL) << partition_name_ << " parse ConfState from db failed.";
+  }
+  configuration_.ParseFrom(conf_state);
+
+  // 2. Recover term
+  key = MakeTermKey();
+  value.clear();
+  db_->Get(key, &value);
+  term_ = std::strtoull(value.c_str(), NULL, 10);
+
+  // 3. Recover voted_for
+  key = MakeVotedForKey();
+  value.clear();
+  db_->Get(key, &value);
+  if (!voted_for_.ParseFromIpPort(value)) {
+    LOG(FATAL) << partition_name_ << " parse VotedFor failed, value " << value;
+  }
+}
+
+Status DBBasedClusterMetaStorage::applied_offset(LogOffset* offset) {
+  slash::RWLock lk(&rwlock_, false);
+  *offset = applied_offset_;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::set_applied_offset(const LogOffset& offset) {
+  slash::RWLock lk(&rwlock_, true);
+  if (offset.l_offset.index > applied_offset_.l_offset.index) {
+    applied_offset_ = offset;
+  }
+  // TODO(LIBA-S): persist it
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::snapshot_offset(LogOffset* offset) {
+  slash::RWLock lk(&rwlock_, false);
+  *offset = snapshot_offset_;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::set_snapshot_offset(const LogOffset& offset) {
+  slash::RWLock lk(&rwlock_, true);
+  if (offset.l_offset.index > snapshot_offset_.l_offset.index) {
+    snapshot_offset_ = offset;
+  }
+  // TODO(LIBA-S): persist it
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::configuration(Configuration* conf) {
+  slash::RWLock lk(&rwlock_, false);
+  *conf = configuration_;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::set_configuration(const Configuration& conf) {
+  slash::RWLock lk(&rwlock_, true);
+  Status s = unsafe_set_configuration(conf);
+  if (!s.ok()) {
+    return s;
+  }
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::unsafe_set_configuration(const Configuration& conf) {
+  // persistent to storage
+  InnerMessage::ConfState state = conf.ConfState();
+  std::string to_store;
+  if (!state.SerializeToString(&to_store)) {
+    LOG(FATAL) << partition_name_ << " serialize ConfChange Failed";
+  }
+  std::string key = MakeConfStateKey();
+  blackwidow::Status s = db_->Set(key, to_store);
+  if (!s.ok()) {
+    LOG(FATAL) << partition_name_ << " set ConfChange to db Failed " << s.ToString();
+  }
+  configuration_ = conf;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::ApplyConfiguration(const Configuration& conf, const LogOffset& offset) {
+  slash::RWLock lk(&rwlock_, true);
+  Status s = unsafe_set_configuration(conf);
+  if (!s.ok()) {
+    return s;
+  }
+  if (offset.l_offset.index > applied_offset_.l_offset.index) {
+    applied_offset_ = offset;
+  }
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::SetTermAndVotedFor(const PeerID& voted_for,
+                                                     uint32_t term) {
+  slash::RWLock lk(&rwlock_, true);
+  std::string term_key = MakeTermKey();
+  blackwidow::Status s = db_->Set(term_key, std::to_string(term));
+  if (!s.ok()) {
+    LOG(WARNING) << partition_name_ << " set Term " << term
+                 << " to db Failed " << s.ToString();
+    return Status::Corruption("set db failed");
+  }
+  term_ = term;
+
+  std::string voted_for_key = MakeVotedForKey();
+  s = db_->Set(voted_for_key, voted_for.ToString());
+  if (!s.ok()) {
+    LOG(WARNING) << partition_name_ << " set VotedFor " << voted_for.ToString()
+                 << " to db Failed " << s.ToString();
+    return Status::Corruption("set db failed");
+  }
+  voted_for_ = voted_for;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::GetTermAndVotedFor(uint32_t* term,
+                                              PeerID* voted_for) {
+  slash::RWLock lk(&rwlock_, false);
+  *term = term_;
+  *voted_for = voted_for_;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::set_term(uint32_t term) {
+  slash::RWLock lk(&rwlock_, true);
+  std::string term_key = MakeTermKey();
+  blackwidow::Status s = db_->Set(term_key, std::to_string(term));
+  if (!s.ok()) {
+    LOG(WARNING) << partition_name_ << " set Term " << term
+                 << " to db Failed " << s.ToString();
+    return Status::Corruption("set db failed");
+  }
+  term_ = term;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::term(uint32_t* term) {
+  slash::RWLock lk(&rwlock_, false);
+  *term = term_;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::set_voted_for(const PeerID& voted_for) {
+  slash::RWLock lk(&rwlock_, true);
+  std::string voted_for_key = MakeVotedForKey();
+  blackwidow::Status s = db_->Set(voted_for_key, voted_for.ToString());
+  if (!s.ok()) {
+    LOG(WARNING) << partition_name_ << " set VotedFor " << voted_for.ToString()
+                 << " to db Failed " << s.ToString();
+    return Status::Corruption("set db failed");
+  }
+  voted_for_ = voted_for;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::voted_for(PeerID* peer_id) {
+  slash::RWLock lk(&rwlock_, false);
+  *peer_id = voted_for_;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::ResetOffset(const LogOffset& snapshot_offset,
+                                              const LogOffset& applied_offset) {
+  slash::RWLock lk(&rwlock_, true);
+  snapshot_offset_ = snapshot_offset;
+  applied_offset_ = applied_offset;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::ResetOffsetAndConfiguration(const LogOffset& snapshot_offset,
+                                                              const LogOffset& applied_offset,
+                                                              const Configuration& configuration) {
+  slash::RWLock lk(&rwlock_, true);
+  Status s = unsafe_set_configuration(configuration);
+  if (!s.ok()) {
+    return s;
+  }
+  snapshot_offset_ = snapshot_offset;
+  applied_offset_ = applied_offset;
+  return Status::OK();
+}
+
+Status DBBasedClusterMetaStorage::MetaSnapshot(LogOffset* applied_offset, Configuration* conf) {
+  slash::RWLock lk(&rwlock_, false);
+  *applied_offset = applied_offset_;
+  *conf = configuration_;
+  return Status::OK();
+}
+
+std::string DBBasedClusterMetaStorage::MakeConfStateKey() {
+  return std::move(std::string(kConfStateKeyPrefix + kKeyGlue + partition_name_));
+}
+
+std::string DBBasedClusterMetaStorage::MakeTermKey() {
+  return std::move(std::string(kTermKeyPrefix + kKeyGlue + partition_name_));
+}
+
+std::string DBBasedClusterMetaStorage::MakeVotedForKey() {
+  return std::move(std::string(kVotedForKeyPrefix + kKeyGlue + partition_name_));
 }

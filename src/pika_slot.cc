@@ -3,14 +3,17 @@
 // LICENSE file in the root directory of this source tree. An additional grant
 // of patent rights can be found in the PATENTS file in the same directory.
 
-#include "include/pika_rm.h"
 #include "include/pika_slot.h"
+
 #include "include/pika_table.h"
 #include "include/pika_server.h"
 #include "include/pika_cmd_table_manager.h"
+#include "include/pika_define.h"
+#include "include/replication/pika_repl_rg_node.h"
+
+using replication::ReplicationGroupNode;
 
 extern PikaCmdTableManager* g_pika_cmd_table_manager;
-extern PikaReplicaManager* g_pika_rm;
 extern PikaServer* g_pika_server;
 extern PikaConf* g_pika_conf;
 
@@ -171,21 +174,20 @@ void SlotsMgrtTagSlotAsyncCmd::Do(std::shared_ptr<Partition> partition) {
   // Until sync done, new node slaveof no one.
   // mark this migrate done
   // proxy retry cached request in new node
-  bool is_exist = true;
-  std::shared_ptr<SyncMasterPartition> master_partition =
-      g_pika_rm->GetSyncMasterPartitionByName(PartitionInfo(table_name_, slot_num_));
-  if (!master_partition) {
-    LOG(WARNING) << "Sync Master Partition: " << table_name_ << ":" << slot_num_
-        << ", NotFound";
+  // bool is_exist = true;
+  auto node = g_pika_server->GetReplicationGroupNode(ReplicationGroupID(table_name_, slot_num_));
+  if (node == nullptr) {
+    LOG(WARNING) << "Replication group: " << table_name_ << ":" << slot_num_
+                 << ", NotFound";
     res_.SetRes(CmdRes::kNotFound, kCmdNameSlotsMgrtTagSlotAsync);
     return;
   }
-  is_exist = master_partition->CheckSlaveNodeExist(dest_ip_, dest_port_);
-  if (is_exist) {
-    remained = 1;
-  } else {
-    remained = 0;
-  }
+  //is_exist = node->CheckFollowerNodeExist(PeerID(dest_ip_, dest_port_));
+  //if (is_exist) {
+  //  remained = 1;
+  //} else {
+  //  remained = 0;
+  //}
   res_.AppendArrayLen(2);
   res_.AppendInteger(moved);
   res_.AppendInteger(remained);

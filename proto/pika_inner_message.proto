@@ -1,0 +1,263 @@
+package InnerMessage;
+
+enum Type {
+  kMetaSync        = 1;
+  kTrySync         = 2;
+  kSnapshotSync    = 3;
+  kBinlogSync      = 4;
+  kHeatBeat        = 5;
+  kRemoveSlaveNode = 6;
+  kRaftMsg         = 7;
+}
+
+enum StatusCode {
+  kOk       = 1;
+  kError    = 2;
+  kOther    = 3;
+}
+
+message BinlogOffset {
+  required uint32  filenum = 1;
+  required uint64  offset  = 2;
+  optional uint32  term    = 3;
+  optional uint64  index   = 4;
+}
+
+message BinlogAttributes {
+  required uint32 exec_time      = 1;
+  required uint32 content_type   = 2;
+  required BinlogOffset offset   = 3;
+  optional uint32 content_length = 4;
+}
+
+message Node {
+  required string ip   = 1;
+  required int32  port = 2;
+}
+
+message Partition {
+  required string table_name   = 1;
+  required uint32 partition_id = 2;
+}
+
+message PartitionInfo {
+  required uint32 partition_id = 1;
+  required Node   master       = 2;
+  repeated Node   slaves       = 3;
+}
+
+message TableInfo {
+  required string table_name    = 1;
+  required uint32 partition_num = 2;
+  repeated uint32 partition_ids = 3;
+}
+
+message PikaMeta {
+  repeated TableInfo table_infos = 1;
+}
+
+// NOT SUPPORTED ANYMORE: use RaftMessage instead.
+message ConsensusMeta {
+  optional uint32       term        = 1;
+  // Leader -> Follower prev_log_offset
+  // Follower -> Leader last_log_offset
+  optional BinlogOffset log_offset  = 2;
+  optional BinlogOffset commit      = 3;
+  optional bool         reject      = 4;
+  repeated BinlogOffset hint        = 5;
+}
+
+// Messages for cluster instance-mode
+enum EntryType {
+  kEntryNormal     = 1;
+  kEntryConfChange = 2;
+}
+
+message Entry {
+  required EntryType        type       = 1;
+  required BinlogAttributes attributes = 2;
+  required bytes            data       = 3;
+}
+
+message BaseEntry {
+  required EntryType    type        = 1;
+  optional ConfChange   conf_change = 2;
+  optional bytes        normal_data = 3;
+}
+
+enum ConfChangeType {
+  kAddVoter        = 1;
+  kAddLearner      = 2;
+  kRemoveNode      = 3;
+  kPromoteLearner  = 4;
+}
+
+message ConfChange {
+  required ConfChangeType  type    = 1;
+  required Node            node_id = 2;
+}
+
+message ConfState {
+  repeated Node voter   = 1;
+  repeated Node learner = 2;
+}
+
+message SnapMeta {
+  required BinlogOffset snapshot_offset = 1;
+  required ConfState    conf_state      = 2;
+}
+
+enum RaftMessageType {
+  kMsgHeartbeat      = 1;
+  kMsgHeartbeatResp  = 2;
+  kMsgAppend         = 3;
+  kMsgAppendResp     = 4;
+  kMsgPreVote        = 5;
+  kMsgPreVoteResp    = 6;
+  kMsgVote           = 7;
+  kMsgVoteResp       = 8;
+  kMsgTimeoutNow     = 9;
+  kMsgSnapshot       = 10;
+}
+
+message RaftMessage {
+  required RaftMessageType   type             = 1;
+  required Node              to               = 2;
+  required Node              from             = 3;
+  required uint32            term             = 4;
+  required Partition         group_id         = 5;
+  repeated Entry             entries          = 6;
+  optional SnapMeta          snap_meta        = 7;
+  optional BinlogOffset      prev_log         = 8;
+  optional BinlogOffset      commit           = 9;
+  optional bool              reject           = 10;
+  // Indicates the first recieved log by follower
+  optional BinlogOffset      first_log_offset = 11;
+  // Indicates the last log in follower
+  optional BinlogOffset      last_log_offset  = 12;
+  optional bytes             context          = 13;
+}
+
+// Messages for classic model
+message InnerRequest {
+  // slave to master
+  message MetaSync {
+    required Node   node = 1;
+    optional string auth = 2;
+  }
+
+  // slave to master
+  message TrySync {
+    required Node         node           = 1;
+    required Partition    partition      = 2;
+    required BinlogOffset binlog_offset  = 3;
+  }
+
+  // slave to master
+  message SnapshotSync {
+    required Node         node           = 1;
+    required Partition    partition      = 2;
+    required BinlogOffset binlog_offset  = 3;
+  }
+
+  message BinlogSync {
+    required Node         node            = 1;
+    required string       table_name      = 2;
+    required uint32       partition_id    = 3;
+    required BinlogOffset ack_range_start = 4;
+    required BinlogOffset ack_range_end   = 5;
+    required int32        session_id      = 6;
+    required bool         first_send      = 7;
+  }
+
+  message RemoveSlaveNode {
+    required Node         node            = 1;
+    required Partition    partition       = 2;
+  }
+
+  required Type            type              = 1;
+  optional MetaSync        meta_sync         = 2;
+  optional TrySync         try_sync          = 3;
+  optional SnapshotSync    snapshot_sync     = 4;
+  optional BinlogSync      binlog_sync       = 5;
+  repeated RemoveSlaveNode remove_slave_node = 6;
+  // NOT SUPPORTED ANYMORE: use RaftMessage instead.
+  optional ConsensusMeta   consensus_meta    = 7;
+}
+
+// Response message
+message InnerResponse {
+  // master to slave
+  message MetaSync {
+    message TableInfo {
+      required string        table_name    = 1;
+      required int32         partition_num = 2;
+    }
+    required bool      classic_mode = 1;
+    repeated TableInfo tables_info  = 2;
+  }
+
+  // master to slave
+  message TrySync {
+    enum ReplyCode {
+      kOk                = 1;
+      kSyncPointBePurged = 2;
+      kSyncPointLarger   = 3;
+      kError             = 4;
+    }
+    required ReplyCode    reply_code      = 1;
+    required Partition    partition       = 2;
+    optional BinlogOffset binlog_offset   = 3;
+    optional int32        session_id      = 4;
+  }
+
+  message SnapshotSync {
+    required Partition    partition       = 1;
+    required int32        session_id      = 2;
+  }
+
+  // master to slave
+  message BinlogSync {
+    required Partition      partition     = 1;
+    required BinlogOffset   binlog_offset = 2;
+    required bytes          binlog        = 3;
+    required int32          session_id    = 4;
+  }
+
+  message RemoveSlaveNode {
+    required Node         node            = 1;
+    required Partition    partition       = 2;
+  }
+
+  required Type            type              = 1;
+  required StatusCode      code              = 2;
+  optional string          reply             = 3;
+  optional MetaSync        meta_sync         = 4;
+  optional SnapshotSync    snapshot_sync     = 5;
+  optional TrySync         try_sync          = 6;
+  repeated BinlogSync      binlog_sync       = 7;
+  repeated RemoveSlaveNode remove_slave_node = 8;
+  // NOT SUPPORTED ANYMORE: use RaftMessage instead.
+  optional ConsensusMeta   consensus_meta    = 9;
+}
+
+message ClassicMessage {
+  enum MessageType {
+    kRequestType  = 1;
+    kResponseType = 2;
+  }
+  required MessageType   msg_type = 1;
+  optional InnerRequest  request  = 2;
+  optional InnerResponse response = 3;
+}
+
+// Total view of messages
+message ProtocolMessage {
+  enum ProtocolType {
+    kClassicType   = 1;
+    kClusterType = 2;
+  }
+  required ProtocolType   proto_type    = 1;
+  optional ClassicMessage classic_msg   = 2;
+  optional RaftMessage    cluster_msg   = 3;
+}

@@ -7,10 +7,8 @@
 
 #include "include/pika_server.h"
 #include "include/pika_cmd_table_manager.h"
-#include "include/pika_rm.h"
 
 extern PikaServer* g_pika_server;
-extern PikaReplicaManager* g_pika_rm;
 extern PikaCmdTableManager* g_pika_cmd_table_manager;
 
 std::string TablePath(const std::string& path,
@@ -23,9 +21,11 @@ std::string TablePath(const std::string& path,
 Table::Table(const std::string& table_name,
              uint32_t partition_num,
              const std::string& db_path,
-             const std::string& log_path) :
+             const std::string& log_path,
+             const std::shared_ptr<blackwidow::BlackWidow>& state_db) :
   table_name_(table_name),
-  partition_num_(partition_num) {
+  partition_num_(partition_num),
+  state_db_(state_db) {
 
   db_path_ = TablePath(db_path, table_name_);
   log_path_ = TablePath(log_path, "log_" + table_name_);
@@ -112,7 +112,7 @@ Status Table::AddPartitions(const std::set<uint32_t>& partition_ids) {
 
   for (const uint32_t& id : partition_ids) {
     partitions_.emplace(id, std::make_shared<Partition>(
-          table_name_, id, db_path_));
+          table_name_, id, db_path_, state_db_));
   }
   return Status::OK();
 }

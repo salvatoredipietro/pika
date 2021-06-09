@@ -13,9 +13,14 @@
 #include "slash/include/slash_string.h"
 
 #include "include/pika_partition.h"
+#include "include/util/callbacks.h"
+#include "include/pika_define.h"
+#include "include/storage/pika_binlog_transverter.h"
+#include "include/replication/pika_repl_rg_node.h"
 
-class SyncMasterPartition;
-class SyncSlavePartition;
+using util::Closure;
+using storage::PikaBinlogTransverter;
+using replication::ReplicationGroupNode;
 
 //Constant for command name
 //Admin
@@ -411,29 +416,7 @@ class Cmd: public std::enable_shared_from_this<Cmd> {
   enum CmdStage {
     kNone,
     kBinlogStage,
-    kExecuteStage
-  };
-  struct HintKeys {
-    HintKeys() {}
-    void Push(const std::string& key, int hint) {
-      keys.push_back(key);
-      hints.push_back(hint);
-    }
-    bool empty() const {
-      return keys.empty() && hints.empty();
-    }
-    std::vector<std::string> keys;
-    std::vector<int> hints;
-  };
-  struct ProcessArg {
-    ProcessArg() {}
-    ProcessArg(std::shared_ptr<Partition> _partition,
-        std::shared_ptr<SyncMasterPartition> _sync_partition,
-        HintKeys _hint_keys) : partition(_partition),
-        sync_partition(_sync_partition), hint_keys(_hint_keys) {}
-    std::shared_ptr<Partition> partition;
-    std::shared_ptr<SyncMasterPartition> sync_partition;
-    HintKeys hint_keys;
+    kExecuteStage,
   };
   Cmd(const std::string& name, int arity, uint16_t flag)
     : name_(name), arity_(arity), flag_(flag), stage_(kNone), do_duration_(0) {}
@@ -443,38 +426,30 @@ class Cmd: public std::enable_shared_from_this<Cmd> {
   virtual void Execute();
   virtual void ProcessFlushDBCmd();
   virtual void ProcessFlushAllCmd();
-  virtual void ProcessSinglePartitionCmd();
-  virtual void ProcessMultiPartitionCmd();
+  virtual void ProcessPartitionCmd();
   virtual void ProcessDoNotSpecifyPartitionCmd();
   virtual void Do(std::shared_ptr<Partition> partition = nullptr) = 0;
   virtual Cmd* Clone() = 0;
-  // used for execute multikey command into different slots
-  virtual void Split(std::shared_ptr<Partition> partition, const HintKeys& hint_keys) = 0;
-  virtual void Merge() = 0;
 
   void Initial(const PikaCmdArgsType& argv,
                const std::string& table_name);
 
-  bool is_write()            const;
-  bool is_local()            const;
-  bool is_suspend()          const;
-  bool is_admin_require()    const;
-  bool is_single_partition() const;
-  bool is_multi_partition()  const;
-  bool is_classic_mode()     const;
+  bool is_write()              const;
+  bool is_local()              const;
+  bool is_suspend()            const;
+  bool is_admin_require()      const;
+  bool is_partition_specific() const;
+  bool is_single_partition()   const;
+  bool is_multi_partition()    const;
+  bool is_classic_mode()       const;
   bool HashtagIsConsistent(const std::string& lhs, const std::string& rhs) const;
   uint64_t GetDoDuration() const { return do_duration_; };
 
   std::string name() const;
   CmdRes& res();
   std::string table_name() const;
-  BinlogOffset binlog_offset() const;
   const PikaCmdArgsType& argv() const;
-  virtual std::string ToBinlog(uint32_t exec_time,
-                               uint32_t term_id,
-                               uint64_t logic_id,
-                               uint32_t filenum,
-                               uint64_t offset);
+  virtual std::string ToBinlogContent();
 
   void SetConn(const std::shared_ptr<pink::PinkConn> conn);
   std::shared_ptr<pink::PinkConn> GetConn();
@@ -487,11 +462,11 @@ class Cmd: public std::enable_shared_from_this<Cmd> {
   // enable copy, used default copy
   //Cmd(const Cmd&);
   void ProcessCommand(std::shared_ptr<Partition> partition,
-      std::shared_ptr<SyncMasterPartition> sync_partition, const HintKeys& hint_key = HintKeys());
-  void InternalProcessCommand(std::shared_ptr<Partition> partition,
-      std::shared_ptr<SyncMasterPartition> sync_partition, const HintKeys& hint_key);
-  void DoCommand(std::shared_ptr<Partition> partition, const HintKeys& hint_key);
-  void DoBinlog(std::shared_ptr<SyncMasterPartition> partition);
+                      std::shared_ptr<ReplicationGroupNode> node);
+  void DoCommandAndBinlog(std::shared_ptr<Partition> partition,
+                          std::shared_ptr<ReplicationGroupNode> node);
+  void DoCommand(std::shared_ptr<Partition> partition);
+  void DoBinlog(std::shared_ptr<ReplicationGroupNode> node, bool data_applied = false);
   bool CheckArg(int num) const;
   void LogCommand() const;
 
@@ -513,6 +488,28 @@ class Cmd: public std::enable_shared_from_this<Cmd> {
   virtual void Clear() {};
 
   Cmd& operator=(const Cmd&);
+};
+
+class LogClosure final : public Closure {
+ public:
+  LogClosure(const LogOffset& offset,
+             const ReplicationGroupID& group_id,
+             std::shared_ptr<Cmd> ptr,
+             std::shared_ptr<pink::PinkConn> conn_ptr,
+             std::shared_ptr<std::string> resp_ptr);
+
+  void SetLogOffset(const LogOffset& offset) {
+    offset_ = offset;
+  }
+
+ private:
+  ~LogClosure() = default;
+  virtual void run() override;
+  LogOffset offset_;
+  ReplicationGroupID group_id_;
+  std::shared_ptr<Cmd> cmd_ptr_;
+  std::shared_ptr<pink::PinkConn> conn_ptr_;
+  std::shared_ptr<std::string> resp_ptr_;
 };
 
 typedef std::unordered_map<std::string, Cmd*> CmdTable;

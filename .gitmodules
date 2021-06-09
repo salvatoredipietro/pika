@@ -13,3 +13,6 @@
 [submodule "third/pink"]
 	path = third/pink
 	url = https://github.com/Qihoo360/pink.git
+[submodule "third/gtest"]
+	path = third/gtest
+	url = https://github.com/google/googletest.git

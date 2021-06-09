@@ -4,7 +4,8 @@
 // of patent rights can be found in the PATENTS file in the same directory.
 
 #include "include/pika_meta.h"
-#include "src/pika_inner_message.pb.h"
+
+#include "proto/pika_inner_message.pb.h"
 
 const uint32_t VERSION = 1;
 
