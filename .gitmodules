@@ -1,15 +1,15 @@
 [submodule "third/glog"]
 	path = third/glog
-	url = https://github.com/Qihoo360/glog.git
+	url = https://github.com/salvatoredipietro/glog.git
 [submodule "third/slash"]
 	path = third/slash
-	url = https://github.com/Qihoo360/slash.git
+	url = https://github.com/salvatoredipietro/Qihoo360_slash.git
 [submodule "third/rocksdb"]
 	path = third/rocksdb
 	url = https://github.com/facebook/rocksdb.git
 [submodule "third/blackwidow"]
 	path = third/blackwidow
-	url = https://github.com/Qihoo360/blackwidow.git
+	url = https://github.com/salvatoredipietro/Qihoo36_blackwidow.git
 [submodule "third/pink"]
 	path = third/pink
-	url = https://github.com/Qihoo360/pink.git
+	url = https://github.com/salvatoredipietro/Qihoo360_pink.git

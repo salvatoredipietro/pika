@@ -61,19 +61,19 @@ The User can download the binary release from [releases](https://github.com/Qiho
 * snappy - a library for fast data compression
 * glog - google log library
 
-Upgrade your gcc to version at least 4.8 to get C++11 support.
+Upgrade your gcc to version at least 5.0 to get C++17 support.
 
 ### Supported platforms
 
 * linux - CentOS 6&7
 
-* linux - Ubuntu
+* linux - Ubuntu (20.04 and later)
 
 If it comes to some missing libs, install them according to the prompts and retry it.
 
 ### Compile
 
-Upgrade your gcc to version at least 4.8 to get C++11 support.
+Upgrade your gcc to version at least 5.0 to get C++17 support.
 
 Get the source code
 

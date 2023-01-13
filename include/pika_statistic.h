@@ -6,6 +6,7 @@
 #ifndef PIKA_STATISTIC_H_
 #define PIKA_STATISTIC_H_
 
+#include <string>
 #include <atomic>
 #include <unordered_map>
 

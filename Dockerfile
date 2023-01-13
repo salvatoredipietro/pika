@@ -1,18 +1,17 @@
- FROM centos:7 as builder
-
+FROM centos:7 as builder
 LABEL maintainer="SvenDowideit@home.org.au, zhangshaomin_1990@126.com"
 
 ENV PIKA  /pika
 ENV PIKA_BUILD_DIR /tmp/pika
-ENV PATH ${PIKA}:${PIKA}/bin:${PATH}
+ENV PATH ${PIKA}:${PIKA}/bin:/opt/rh/devtoolset-9/root/usr/bin/:${PATH}
 
 COPY . ${PIKA_BUILD_DIR}
-
 WORKDIR ${PIKA_BUILD_DIR}
 
-RUN rpm -ivh https://mirrors.aliyun.com/epel/epel-release-latest-7.noarch.rpm && \
+RUN yum install -y epel-release centos-release-scl  && \
     yum clean all && \
     yum -y makecache && \
+    yum -y install devtoolset-9-*  && \
     yum -y install snappy-devel && \
     yum -y install protobuf-devel && \
     yum -y install gflags-devel && \
@@ -21,15 +20,12 @@ RUN rpm -ivh https://mirrors.aliyun.com/epel/epel-release-latest-7.noarch.rpm &&
     yum -y install zlib-devel && \
     yum -y install lz4-devel && \
     yum -y install libzstd-devel && \
-    yum -y install gcc-c++ && \
-    yum -y install make && \
     yum -y install which && \
     yum -y install git && \
-    make -j$(shell grep -c ^processor /proc/cpuinfo 2>/dev/null) && \
+    make -j$(nproc) && \
     cp -r ${PIKA_BUILD_DIR}/output ${PIKA} && \
     cp -r ${PIKA_BUILD_DIR}/entrypoint.sh ${PIKA} && \
-    yum -y remove gcc-c++ && \
-    yum -y remove make && \
+    yum -y remove devtoolset-9-*  && \
     yum -y remove which && \
     yum -y remove git && \
     yum -y clean all 

@@ -1,7 +1,14 @@
 CLEAN_FILES = # deliberately empty, so we can append below.
-CXX=g++
+CXX?=g++
 PLATFORM_LDFLAGS= -lpthread -lrt
-PLATFORM_CXXFLAGS= -std=c++11 -fno-builtin-memcmp -msse -msse4.2 
+PLATFORM_CXXFLAGS= -std=c++17 -fno-builtin-memcmp
+ARCH:=$(shell uname -p)
+ifeq ($(ARCH), aarch64)
+	ARCH_CXXFLAGS+=-march=armv8-a+crc+crypto -moutline-atomics
+endif
+ifeq ($(ARCH), x86_64)
+	ARCH_CXXFLAGS+=-msse -msse4.2
+endif
 ROCKSDB_CXXFLAGS=
 CC_VERSION_MAJOR := $(shell $(CXX) -dumpversion | cut -d '.' -f1)
 ifeq (1,$(shell expr $(CC_VERSION_MAJOR) \> 7))
@@ -10,6 +17,13 @@ endif
 PROFILING_FLAGS=-pg
 OPT=
 LDFLAGS += -Wl,-rpath=$(RPATH)
+
+# Compile local Glog library if AmazonLinux2 is used
+OS_ID := $(shell cat /etc/os-release | grep ^ID= | cut -d'=' -f2 | sed 's/\"//gI')
+OS_VERS := $(shell cat /etc/os-release | grep ^VERSION_ID | cut -d'=' -f2 | sed 's/\"//gI')
+ifeq ("$(OS_ID) $(OS_VERS)", "amzn 2")
+360=1
+endif
 
 # DEBUG_LEVEL can have two values:
 # * DEBUG_LEVEL=2; this is the ultimate debug mode. It will compile pika
@@ -113,12 +127,15 @@ LIB_PATH += -L$(GLOG_PATH)/.libs
 endif
 
 LDFLAGS += $(LIB_PATH) \
+	   				 -lz \
+					 -lsnappy \
 			 		 -lpink$(DEBUG_SUFFIX) \
 			 		 -lslash$(DEBUG_SUFFIX) \
 					 -lblackwidow$(DEBUG_SUFFIX) \
 					 -lrocksdb$(DEBUG_SUFFIX) \
 					 -lglog \
 					 -lprotobuf \
+					 -ldl \
 
 # ---------------End Dependences----------------
 
@@ -231,7 +248,7 @@ $(PINK):
 	$(AM_V_at)make -C $(PINK_PATH)/pink/ DEBUG_LEVEL=$(DEBUG_LEVEL) NO_PB=0 SLASH_PATH=$(SLASH_PATH)
 
 $(ROCKSDB):
-	$(AM_V_at) CXXFLAGS='$(ROCKSDB_CXXFLAGS)' make -j $(PROCESSOR_NUMS) -C $(ROCKSDB_PATH)/ static_lib DISABLE_JEMALLOC=1 DEBUG_LEVEL=$(DEBUG_LEVEL) 
+	$(AM_V_at)USE_RTTI=1  CXXFLAGS='$(ROCKSDB_CXXFLAGS)' make -j $(PROCESSOR_NUMS) -C $(ROCKSDB_PATH)/ static_lib DISABLE_JEMALLOC=1 DEBUG_LEVEL=$(DEBUG_LEVEL)
 
 $(BLACKWIDOW):
 	$(AM_V_at)make -C $(BLACKWIDOW_PATH) ROCKSDB_PATH=$(ROCKSDB_PATH) SLASH_PATH=$(SLASH_PATH) DEBUG_LEVEL=$(DEBUG_LEVEL)
