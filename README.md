@@ -65,7 +65,7 @@ Upgrade your gcc to version at least 5.0 to get C++17 support.
 
 ### Supported platforms
 
-* linux - CentOS 6&7
+* linux - CentOS 7 (and later)
 
 * linux - Ubuntu (20.04 and later)
 
