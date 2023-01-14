@@ -1,7 +1,14 @@
 CLEAN_FILES = # deliberately empty, so we can append below.
-CXX=g++
+CXX?=g++
 PLATFORM_LDFLAGS= -lpthread -lrt
-PLATFORM_CXXFLAGS= -std=c++11 -fno-builtin-memcmp -msse -msse4.2 
+PLATFORM_CXXFLAGS= -std=c++17 -fno-builtin-memcmp
+ARCH:=$(shell uname -p)
+ifeq ($(ARCH), aarch64)
+	ARCH_CXXFLAGS+=-march=armv8-a+crc+crypto -moutline-atomics
+endif
+ifeq ($(ARCH), x86_64)
+	ARCH_CXXFLAGS+=-msse -msse4.2
+endif
 ROCKSDB_CXXFLAGS=
 CC_VERSION_MAJOR := $(shell $(CXX) -dumpversion | cut -d '.' -f1)
 ifeq (1,$(shell expr $(CC_VERSION_MAJOR) \> 7))
@@ -113,6 +120,8 @@ LIB_PATH += -L$(GLOG_PATH)/.libs
 endif
 
 LDFLAGS += $(LIB_PATH) \
+	   				 -lz \
+					 -lsnappy \
 			 		 -lpink$(DEBUG_SUFFIX) \
 			 		 -lslash$(DEBUG_SUFFIX) \
 					 -lblackwidow$(DEBUG_SUFFIX) \
