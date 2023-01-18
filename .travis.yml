@@ -5,18 +5,13 @@ language: cpp
 os:
   - linux
 
-env:
-  global:
-    - PROTOBUF_VERSION=3.20.3
-
-install:
-  - wget https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-cpp-${PROTOBUF_VERSION}.tar.gz
-  - tar xvf protobuf-cpp-$PROTOBUF_VERSION.tar.gz
-  - (cd protobuf-$PROTOBUF_VERSION && ./configure --prefix=/usr && make && sudo make install )
-
 addons:
   apt:
-    packages: ['libsnappy-dev', 'libprotobuf-dev', 'libgoogle-glog-dev']
+    packages:
+      - libsnappy-dev
+      - libgoogle-glog-dev
+      - libprotobuf-dev
+      - protobuf-compiler
 
 compiler:
   - gcc
