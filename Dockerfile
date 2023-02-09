@@ -22,7 +22,7 @@ RUN yum install -y epel-release centos-release-scl  && \
     yum -y install libzstd-devel && \
     yum -y install which && \
     yum -y install git && \
-    make -j$(nproc) && \
+    make && \
     cp -r ${PIKA_BUILD_DIR}/output ${PIKA} && \
     cp -r ${PIKA_BUILD_DIR}/entrypoint.sh ${PIKA} && \
     yum -y remove devtoolset-9-*  && \
